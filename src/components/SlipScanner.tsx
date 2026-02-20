@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import { resolveLeagues } from "@/lib/leagues/client";
 
 type ProposedBet = {
   date: string; // YYYY-MM-DD (we’ll default if missing)
