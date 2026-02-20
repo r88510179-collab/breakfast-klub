@@ -5,14 +5,14 @@ import { supabase } from "@/lib/supabaseClient";
 import { resolveLeagues } from "@/lib/leagues/client";
 
 type ProposedBet = {
-  date: string; // YYYY-MM-DD (we’ll default if missing)
+  date: string;
   capper: string;
   league: string;
   market: string;
   play: string;
 
   selection: string;
-  line: string; // keep as string for editing; convert to number on save if possible
+  line: string;
   odds: string;
   units: string;
 
@@ -106,7 +106,6 @@ export default function SlipScanner({
       if (!r.league.trim()) missing.push("league");
       if (!r.market.trim()) missing.push("market");
       if (!r.play.trim()) missing.push("play");
-
       if (missing.length) problems.push(`Row ${idx + 1}: missing ${missing.join(", ")}`);
     });
     return problems;
@@ -161,33 +160,61 @@ export default function SlipScanner({
       return;
     }
 
-    const payload = rows.map((r) => {
-      const lineNum = r.line.trim() ? Number(r.line) : null;
-      const oddsNum = r.odds.trim() ? Number(r.odds) : null;
-      const unitsNum = r.units.trim() ? Number(r.units) : 1;
-
-      return {
-        date: r.date || todayISO(),
-        capper: r.capper.trim(),
-        league: r.league.trim(),
-        market: r.market.trim(),
-        play: r.play.trim(),
-        selection: r.selection.trim() || null,
-        line: Number.isFinite(lineNum as any) ? lineNum : null,
-        odds: Number.isFinite(oddsNum as any) ? oddsNum : null,
-        units: Number.isFinite(unitsNum as any) ? unitsNum : 1,
-        opponent: r.opponent.trim() || null,
-        notes: r.notes.trim() || null,
-        book: book.trim() || null,
-        slip_ref: slipRef.trim() || null,
-        status: "OPEN",
-        result: "OPEN",
-        ai_meta: { source: "slip_scan" },
-      };
-    });
-
     setBusy(true);
     try {
+      // ✅ THIS BLOCK GOES HERE (before building payload)
+      const resolveResults = await resolveLeagues(
+        rows.map((r) => ({ league_text: r.league }))
+      );
+
+      const resolvedByIndex = resolveResults.map((rr) => rr.resolved);
+
+      const unresolved = resolvedByIndex
+        .map((r, i) => ({ r, i }))
+        .filter((x) => !x.r);
+
+      if (unresolved.length) {
+        setErr(
+          `Unrecognized leagues in rows: ${unresolved.map((x) => x.i + 1).join(", ")}. ` +
+            `Go to Settings → Leagues and register them (paste ESPN scoreboard URL + aliases).`
+        );
+        return;
+      }
+
+      // ✅ THIS PAYLOAD BUILDER GOES HERE (uses resolvedByIndex)
+      const payload = rows.map((r, idx) => {
+        const resolved = resolvedByIndex[idx]!;
+        const lineNum = r.line.trim() ? Number(r.line) : null;
+        const oddsNum = r.odds.trim() ? Number(r.odds) : null;
+        const unitsNum = r.units.trim() ? Number(r.units) : 1;
+
+        return {
+          date: r.date || todayISO(),
+          capper: r.capper.trim(),
+
+          // Standardized league fields
+          sport_key: resolved.sport_key,
+          league_key: resolved.league_key,
+          league_abbrev: resolved.league_abbrev,
+          league_name: resolved.league_name,
+          league: resolved.league_abbrev ?? r.league.trim(),
+
+          market: r.market.trim(),
+          play: r.play.trim(),
+          selection: r.selection.trim() || null,
+          line: Number.isFinite(lineNum as any) ? lineNum : null,
+          odds: Number.isFinite(oddsNum as any) ? oddsNum : null,
+          units: Number.isFinite(unitsNum as any) ? unitsNum : 1,
+          opponent: r.opponent.trim() || null,
+          notes: r.notes.trim() || null,
+          book: book.trim() || null,
+          slip_ref: slipRef.trim() || null,
+          status: "OPEN",
+          result: "OPEN",
+          ai_meta: { source: "slip_scan" },
+        };
+      });
+
       const { error } = await supabase.from("bets").insert(payload as any);
       if (error) {
         setErr(error.message);
@@ -198,6 +225,8 @@ export default function SlipScanner({
       setIssues([]);
       setRows([]);
       await onAdded();
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
     } finally {
       setBusy(false);
     }
@@ -239,7 +268,7 @@ export default function SlipScanner({
           disabled={busy || !file}
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:bg-gray-400"
         >
-          {busy ? "Scanning…" : "Scan slip"}
+          {busy ? "Working…" : "Scan slip"}
         </button>
 
         <button
@@ -247,7 +276,7 @@ export default function SlipScanner({
           disabled={busy || rows.length === 0}
           className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 disabled:bg-gray-400"
         >
-          Add to ledger
+          {busy ? "Working…" : "Add to ledger"}
         </button>
 
         <button
@@ -319,10 +348,10 @@ export default function SlipScanner({
 
                     <td className="p-2">
                       <input
-                        className="border rounded px-2 py-1 w-[120px]"
+                        className="border rounded px-2 py-1 w-[140px]"
                         value={r.league}
                         onChange={(e) => updateRow(i, "league", e.target.value)}
-                        placeholder="NBA"
+                        placeholder="NBA / EPL / ATP / CBASE …"
                       />
                     </td>
 
@@ -331,7 +360,7 @@ export default function SlipScanner({
                         className="border rounded px-2 py-1 w-[120px]"
                         value={r.market}
                         onChange={(e) => updateRow(i, "market", e.target.value)}
-                        placeholder="Spread"
+                        placeholder="Spread / Total / ML"
                       />
                     </td>
 
@@ -340,7 +369,7 @@ export default function SlipScanner({
                         className="border rounded px-2 py-1 w-[320px]"
                         value={r.play}
                         onChange={(e) => updateRow(i, "play", e.target.value)}
-                        placeholder="Team -3.5"
+                        placeholder="Team -3.5 / Over 2.5"
                       />
                     </td>
 
@@ -376,7 +405,7 @@ export default function SlipScanner({
                         className="border rounded px-2 py-1 w-[180px]"
                         value={r.selection}
                         onChange={(e) => updateRow(i, "selection", e.target.value)}
-                        placeholder="Over / Team"
+                        placeholder="Over / Under / Team"
                       />
                     </td>
 
@@ -419,7 +448,7 @@ export default function SlipScanner({
           </datalist>
 
           <div className="text-xs text-gray-600">
-            Required before insert: date, capper, league, market, play.
+            Required before insert: date, capper, league, market, play. If a league isn’t registered yet, the insert will be blocked.
           </div>
         </div>
       ) : null}
