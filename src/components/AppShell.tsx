@@ -18,10 +18,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
       setSessionEmail(email);
       setChecking(false);
 
-      // Gate private routes
-      if (!email && !isPublicRoute) {
-        window.location.href = "/";
-      }
+      if (!email && !isPublicRoute) window.location.href = "/";
     });
 
     const {
@@ -29,11 +26,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
     } = supabase.auth.onAuthStateChange((_event, session) => {
       const email = session?.user?.email ?? null;
       setSessionEmail(email);
-
-      // If they sign out on a private route, send them to login
-      if (!email && !isPublicRoute) {
-        window.location.href = "/";
-      }
+      if (!email && !isPublicRoute) window.location.href = "/";
     });
 
     return () => subscription.unsubscribe();
@@ -45,15 +38,14 @@ export default function AppShell({ children }: { children: ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen">
-      {/* Header/Nav */}
+    <div className="min-h-screen bg-white">
       {!isPublicRoute && (
-        <header className="border-b bg-white">
-          <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <span className="font-semibold">Breakfast Klub Tracker</span>
+        <header className="border-b">
+          <div className="max-w-5xl mx-auto px-4 py-3 flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-6">
+              <div className="font-semibold">Breakfast Klub Tracker</div>
 
-              <nav className="flex items-center gap-3 text-sm">
+              <nav className="flex flex-wrap items-center gap-3 text-sm">
                 <Link className="text-blue-600 underline" href="/dashboard">
                   Dashboard
                 </Link>
@@ -62,6 +54,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 </Link>
                 <Link className="text-blue-600 underline" href="/reports">
                   Reports
+                </Link>
+                <Link className="text-blue-600 underline" href="/assistant">
+                  Assistant
                 </Link>
                 <Link className="text-blue-600 underline" href="/help">
                   Help
@@ -73,9 +68,7 @@ export default function AppShell({ children }: { children: ReactNode }) {
             </div>
 
             <div className="flex items-center gap-3 text-sm">
-              <span className="text-gray-600">
-                {checking ? "…" : sessionEmail ? sessionEmail : ""}
-              </span>
+              <span className="text-gray-600">{checking ? "…" : sessionEmail ?? ""}</span>
               <button
                 onClick={signOut}
                 className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
@@ -87,7 +80,6 @@ export default function AppShell({ children }: { children: ReactNode }) {
         </header>
       )}
 
-      {/* Page content */}
       <div className="max-w-5xl mx-auto">{children}</div>
     </div>
   );
