@@ -57,7 +57,6 @@ function computeFacts(bets: BetRow[]) {
 function buildContext(bets: BetRow[]) {
   const facts = computeFacts(bets);
 
-  // Keep context compact to reduce token usage/cost
   const openSample = bets
     .filter((b) => String(b.status).toUpperCase() === "OPEN")
     .slice(0, 60)
@@ -117,13 +116,19 @@ function validateAnswerJson(j: any, betsById: Set<string>, facts: any) {
   return { ok: true as const, answer_markdown: answer, used_bet_ids: used };
 }
 
+function normalizeStrategy(x: any): Strategy {
+  const s = String(x ?? "balanced").toLowerCase();
+  if (s === "fast" || s === "balanced" || s === "consensus") return s;
+  return "balanced";
+}
+
 export async function POST(req: Request) {
   const token = getBearerToken(req);
   if (!token) return NextResponse.json({ error: "Missing Authorization Bearer token" }, { status: 401 });
 
   const body = await req.json().catch(() => ({}));
   const prompt = String(body?.prompt ?? "").trim();
-  const strategy = (String(body?.strategy ?? "balanced").toLowerCase() as Strategy) || "balanced";
+  const strategy = normalizeStrategy(body?.strategy);
 
   if (!prompt) return NextResponse.json({ error: "Missing prompt" }, { status: 400 });
 
@@ -131,7 +136,6 @@ export async function POST(req: Request) {
   const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   if (!url || !anon) return NextResponse.json({ error: "Missing Supabase env vars" }, { status: 500 });
 
-  // Use anon key + user bearer token so RLS applies to this user
   const supabase = createClient(url, anon, {
     auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
     global: { headers: { Authorization: `Bearer ${token}` } },
@@ -153,15 +157,26 @@ export async function POST(req: Request) {
 
   // Deterministic commands (no LLM)
   const p = prompt.toLowerCase();
+
   if (p.includes("export open")) {
     const open = bets.filter((b) => String(b.status).toUpperCase() === "OPEN");
-    return NextResponse.json({
-      answer_markdown: "```csv\n" + betsToCSV(open) + "\n```",
-    });
+    return NextResponse.json({ answer_markdown: "```csv\n" + betsToCSV(open) + "\n```" });
   }
+
+  if (p.includes("export final")) {
+    const fin = bets.filter((b) => String(b.status).toUpperCase() === "FINAL");
+    return NextResponse.json({ answer_markdown: "```csv\n" + betsToCSV(fin) + "\n```" });
+  }
+
   if (p.includes("export all")) {
+    return NextResponse.json({ answer_markdown: "```csv\n" + betsToCSV(bets) + "\n```" });
+  }
+
+  if (p.includes("what's open") || p.includes("whats open") || p.includes("needs grading")) {
+    const open = bets.filter((b) => String(b.status).toUpperCase() === "OPEN");
+    const lines = open.slice(0, 200).map((b) => `${b.date} | ${b.capper} | ${b.league} | ${b.market} | ${b.play} | id=${b.id}`);
     return NextResponse.json({
-      answer_markdown: "```csv\n" + betsToCSV(bets) + "\n```",
+      answer_markdown: open.length ? ["OPEN bets:", "", ...lines].join("\n") : "No OPEN bets.",
     });
   }
 
@@ -194,7 +209,6 @@ export async function POST(req: Request) {
   const messages: ChatMessage[] = [system, user];
 
   try {
-    // Primary response
     let primaryRaw: string;
     let altRaw: string | null = null;
 
@@ -209,7 +223,6 @@ export async function POST(req: Request) {
     let primaryJson = safeJsonParse(primaryRaw);
     let primaryValid = validateAnswerJson(primaryJson, betsById, ctx.facts);
 
-    // If consensus gave a second draft, try it if the first fails validation
     if (!primaryValid.ok && altRaw) {
       const altJson = safeJsonParse(altRaw);
       const altValid = validateAnswerJson(altJson, betsById, ctx.facts);
@@ -219,7 +232,6 @@ export async function POST(req: Request) {
       }
     }
 
-    // Verifier / repair (balanced + consensus)
     if (strategy !== "fast") {
       const verifierMessages: ChatMessage[] = [
         {
@@ -251,19 +263,13 @@ export async function POST(req: Request) {
 
       if (verifierJson?.verdict === "FAIL" && verifierJson.fixed) {
         const fixedValid = validateAnswerJson(verifierJson.fixed, betsById, ctx.facts);
-        if (fixedValid.ok) {
-          return NextResponse.json({ answer_markdown: fixedValid.answer_markdown });
-        }
+        if (fixedValid.ok) return NextResponse.json({ answer_markdown: fixedValid.answer_markdown });
       }
     }
 
-    // If verifier couldn't fix but primary is valid
     if (primaryValid.ok) return NextResponse.json({ answer_markdown: primaryValid.answer_markdown });
 
-    return NextResponse.json(
-      { error: "AI output failed validation", details: primaryValid },
-      { status: 422 }
-    );
+    return NextResponse.json({ error: "AI output failed validation", details: primaryValid }, { status: 422 });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? "AI error" }, { status: 500 });
   }
