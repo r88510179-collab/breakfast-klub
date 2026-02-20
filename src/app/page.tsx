@@ -74,7 +74,7 @@ export default function HomePage() {
       if (!data.session) {
         setBanner({
           kind: "success",
-          text: `Account created. Check your email (${v.e}) to confirm, then come back and sign in.`,
+          text: `Account created. Check your email (${v.e}) to confirm your account, then return here and Sign in.`,
         });
         return;
       }
@@ -158,10 +158,40 @@ export default function HomePage() {
   }
 
   return (
-    <main className="p-6 max-w-xl space-y-4">
+    <main className="p-6 max-w-2xl space-y-4">
       <h1 className="text-2xl font-bold">Breakfast Klub Tracker</h1>
 
       <BannerView />
+
+      {/* Instructions for clients */}
+      {!sessionEmail && (
+        <section className="border rounded p-4 bg-gray-50 space-y-2">
+          <h2 className="font-semibold">How to access the tracker</h2>
+          <ol className="list-decimal ml-5 space-y-1 text-sm">
+            <li>
+              <b>New users:</b> Enter your email + a password (6+ characters), then click{" "}
+              <b>Sign up</b>.
+            </li>
+            <li>
+              If you see a message to <b>check your email</b>, open the confirmation email and
+              confirm your account.
+            </li>
+            <li>
+              Return here and click <b>Sign in</b> using the same email/password.
+            </li>
+            <li>
+              <b>Existing users:</b> Enter your email/password and click <b>Sign in</b>.
+            </li>
+            <li>
+              If you don’t receive the confirmation email, enter your email and click{" "}
+              <b>Resend confirmation email</b> (check spam/junk too).
+            </li>
+          </ol>
+          <p className="text-xs text-gray-600">
+            Tip: If autofill causes issues, type the email/password manually.
+          </p>
+        </section>
+      )}
 
       {sessionEmail ? (
         <div className="space-y-4">
@@ -182,7 +212,7 @@ export default function HomePage() {
         <div className="space-y-3">
           <p className="text-lg">Sign in / Sign up</p>
 
-          <div className="grid gap-2">
+          <div className="grid gap-2 max-w-md">
             <input
               type="email"
               name="email"
