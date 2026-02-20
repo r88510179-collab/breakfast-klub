@@ -52,6 +52,9 @@ export default function AppShell({ children }: { children: ReactNode }) {
                 <Link className="text-blue-600 underline" href="/bets">
                   Bets
                 </Link>
+                <Link className="text-blue-600 underline" href="/grading">
+                  Grading
+                </Link>
                 <Link className="text-blue-600 underline" href="/reports">
                   Reports
                 </Link>
