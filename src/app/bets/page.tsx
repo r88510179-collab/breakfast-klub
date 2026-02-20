@@ -1,6 +1,7 @@
 "use client";
 
 import SlipScanner from "@/components/SlipScanner";
+import { resolveLeagues } from "@/lib/leagues/client";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
 import { BetRow, betsToCSV, downloadText, netUnits, toNumber, getUnitSize } from "../../lib/ledger";
