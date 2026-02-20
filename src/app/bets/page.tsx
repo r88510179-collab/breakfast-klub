@@ -194,7 +194,25 @@ export default function BetsPage() {
       result,
       notes: notes.trim() ? notes.trim() : null,
     };
+// ✅ Standardize league before saving
+const rr = await resolveLeagues([{ league_text: league.trim() }]);
+const resolved = rr?.[0]?.resolved;
 
+if (!resolved) {
+  setErr(
+    `League "${league}" is not standardized yet. Go to Settings → Leagues and register it (paste ESPN scoreboard URL + aliases).`
+  );
+  return;
+}
+
+// Apply standardized fields
+payload.sport_key = resolved.sport_key;
+payload.league_key = resolved.league_key;
+payload.league_abbrev = resolved.league_abbrev;
+payload.league_name = resolved.league_name;
+
+// overwrite league column to standardized abbreviation
+payload.league = resolved.league_abbrev ?? league.trim();
     if (status === "FINAL" && result === "OPEN") {
       setErr("If Status is FINAL, Result must be WIN/LOSS/PUSH/VOID/CASHOUT.");
       return;
