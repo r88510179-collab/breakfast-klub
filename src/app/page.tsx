@@ -20,22 +20,69 @@ export default function HomePage() {
       setSessionEmail(session?.user?.email ?? null);
     });
 
-    return () => {
-      subscription.unsubscribe();
-    };
+    return () => subscription.unsubscribe();
   }, []);
+
+  function validateInputs(): { ok: boolean; email: string; password: string } {
+    const e = email.trim();
+    const p = password;
+
+    if (!e || !p) {
+      setMsg("Enter an email and password (password must be 6+ characters).");
+      return { ok: false, email: e, password: p };
+    }
+    if (p.length < 6) {
+      setMsg("Password must be at least 6 characters.");
+      return { ok: false, email: e, password: p };
+    }
+    return { ok: true, email: e, password: p };
+  }
 
   async function signUp() {
     setMsg("");
-    const { error } = await supabase.auth.signUp({ email, password });
-    if (error) setMsg(error.message);
-    else setMsg("Sign-up success. Now sign in.");
+    const v = validateInputs();
+    if (!v.ok) return;
+
+    const { error } = await supabase.auth.signUp({
+      email: v.email,
+      password: v.password,
+    });
+
+    if (error) {
+      if (error.message.includes("Anonymous sign-ins are disabled")) {
+        setMsg(
+          "Email/password were not sent. Type them manually (avoid autofill), then try again."
+        );
+      } else {
+        setMsg(error.message);
+      }
+      return;
+    }
+
+    setMsg(
+      "Sign-up submitted. If email confirmation is enabled in Supabase, check your inbox, then sign in."
+    );
   }
 
   async function signIn() {
     setMsg("");
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) setMsg(error.message);
+    const v = validateInputs();
+    if (!v.ok) return;
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: v.email,
+      password: v.password,
+    });
+
+    if (error) {
+      if (error.message.includes("Anonymous sign-ins are disabled")) {
+        setMsg(
+          "Email/password were not sent. Type them manually (avoid autofill), then try again."
+        );
+      } else {
+        setMsg(error.message);
+      }
+    }
   }
 
   async function signOut() {
@@ -64,21 +111,32 @@ export default function HomePage() {
       ) : (
         <div className="space-y-4">
           <p className="text-lg">Sign in / Sign up</p>
+
           <div className="grid gap-2">
             <input
               type="email"
+              name="email"
+              autoComplete="email"
               placeholder="email"
               className="border rounded px-2 py-1"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              onInput={(e) => setEmail((e.target as HTMLInputElement).value)}
             />
+
             <input
               type="password"
-              placeholder="password"
+              name="password"
+              autoComplete="new-password"
+              placeholder="password (6+ chars)"
               className="border rounded px-2 py-1"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              onInput={(e) =>
+                setPassword((e.target as HTMLInputElement).value)
+              }
             />
+
             <div className="flex gap-2">
               <button
                 onClick={signIn}
@@ -93,6 +151,7 @@ export default function HomePage() {
                 Sign up
               </button>
             </div>
+
             {msg && <p className="text-red-600">{msg}</p>}
           </div>
         </div>
