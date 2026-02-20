@@ -4,14 +4,7 @@ import SlipScanner from "@/components/SlipScanner";
 import { resolveLeagues } from "@/lib/leagues/client";
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabaseClient";
-import {
-  BetRow,
-  betsToCSV,
-  downloadText,
-  netUnits,
-  toNumber,
-  getUnitSize,
-} from "../../lib/ledger";
+import { BetRow, betsToCSV, downloadText, netUnits, toNumber, getUnitSize } from "../../lib/ledger";
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
@@ -114,9 +107,9 @@ export default function BetsPage() {
           b.league,
           b.market,
           b.play,
-          b.opponent,
-          b.final_score,
-          b.notes,
+          (b as any).opponent,
+          (b as any).final_score,
+          (b as any).notes,
         ]
           .filter(Boolean)
           .join(" | ")
@@ -172,14 +165,14 @@ export default function BetsPage() {
     setLeague(b.league);
     setMarket(b.market);
     setPlay(b.play);
-    setOdds(b.odds === null || b.odds === undefined ? "" : String(b.odds));
-    setUnits(b.units === null || b.units === undefined ? "1" : String(b.units));
-    setOpponent(b.opponent ?? "");
-    setFinalScore(b.final_score ?? "");
-    setStatus(String(b.status).toUpperCase() === "FINAL" ? "FINAL" : "OPEN");
-    const r = String(b.result).toUpperCase();
+    setOdds((b as any).odds === null || (b as any).odds === undefined ? "" : String((b as any).odds));
+    setUnits((b as any).units === null || (b as any).units === undefined ? "1" : String((b as any).units));
+    setOpponent((b as any).opponent ?? "");
+    setFinalScore((b as any).final_score ?? "");
+    setStatus(String((b as any).status).toUpperCase() === "FINAL" ? "FINAL" : "OPEN");
+    const r = String((b as any).result).toUpperCase();
     setResult((["OPEN", "WIN", "LOSS", "PUSH", "VOID", "CASHOUT"].includes(r) ? r : "OPEN") as any);
-    setNotes(b.notes ?? "");
+    setNotes((b as any).notes ?? "");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -223,7 +216,6 @@ export default function BetsPage() {
     payload.league_name = resolved.league_name;
     payload.league = resolved.league_abbrev ?? league.trim();
 
-    // Guard: if FINAL, result cannot be OPEN
     if (status === "FINAL" && result === "OPEN") {
       setErr("If Status is FINAL, Result must be WIN/LOSS/PUSH/VOID/CASHOUT.");
       return;
@@ -274,6 +266,7 @@ export default function BetsPage() {
     <main className="p-6 space-y-6">
       <h1 className="text-2xl font-bold">Bets</h1>
 
+      {/* SLIP SCANNER (UPLOAD IMAGE + REVIEW + ADD) */}
       <SlipScanner cappers={cappers} onAdded={fetchAllBets} />
 
       {/* Summary */}
@@ -300,9 +293,7 @@ export default function BetsPage() {
         </div>
       </section>
 
-      {err ? (
-        <div className="border border-red-300 bg-red-50 text-red-800 rounded p-3">{err}</div>
-      ) : null}
+      {err ? <div className="border border-red-300 bg-red-50 text-red-800 rounded p-3">{err}</div> : null}
 
       {/* Add/Edit */}
       <section className="border rounded p-4 space-y-3">
@@ -310,17 +301,11 @@ export default function BetsPage() {
           <h2 className="font-semibold">{editingId ? "Edit / Grade Bet" : "Add Bet"}</h2>
           <div className="flex gap-2">
             {editingId ? (
-              <button
-                onClick={resetForm}
-                className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
-              >
+              <button onClick={resetForm} className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">
                 Cancel edit
               </button>
             ) : null}
-            <button
-              onClick={exportFiltered}
-              className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
-            >
+            <button onClick={exportFiltered} className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">
               Export filtered CSV
             </button>
           </div>
@@ -329,12 +314,7 @@ export default function BetsPage() {
         <div className="grid gap-2 md:grid-cols-2">
           <div className="space-y-1">
             <div className="text-sm font-medium">Date</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-            />
+            <input className="border rounded px-2 py-2 w-full" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
           </div>
 
           <div className="space-y-1">
@@ -355,79 +335,42 @@ export default function BetsPage() {
 
           <div className="space-y-1">
             <div className="text-sm font-medium">League</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={league}
-              onChange={(e) => setLeague(e.target.value)}
-              placeholder="NBA / EPL / ATP / CBASE ..."
-            />
+            <input className="border rounded px-2 py-2 w-full" value={league} onChange={(e) => setLeague(e.target.value)} />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Market</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={market}
-              onChange={(e) => setMarket(e.target.value)}
-              placeholder="Spread / Total / ML"
-            />
+            <input className="border rounded px-2 py-2 w-full" value={market} onChange={(e) => setMarket(e.target.value)} />
           </div>
 
           <div className="space-y-1 md:col-span-2">
             <div className="text-sm font-medium">Play</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={play}
-              onChange={(e) => setPlay(e.target.value)}
-            />
+            <input className="border rounded px-2 py-2 w-full" value={play} onChange={(e) => setPlay(e.target.value)} />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Odds (American)</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={odds}
-              onChange={(e) => setOdds(e.target.value)}
-              placeholder="-110 or +150"
-            />
+            <input className="border rounded px-2 py-2 w-full" value={odds} onChange={(e) => setOdds(e.target.value)} placeholder="-110 or +150" />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Units risked</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={units}
-              onChange={(e) => setUnits(e.target.value)}
-              placeholder="1"
-            />
+            <input className="border rounded px-2 py-2 w-full" value={units} onChange={(e) => setUnits(e.target.value)} placeholder="1" />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Opponent / Matchup</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={opponent}
-              onChange={(e) => setOpponent(e.target.value)}
-            />
+            <input className="border rounded px-2 py-2 w-full" value={opponent} onChange={(e) => setOpponent(e.target.value)} />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Final score</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={finalScore}
-              onChange={(e) => setFinalScore(e.target.value)}
-              placeholder="Only if FINAL"
-            />
+            <input className="border rounded px-2 py-2 w-full" value={finalScore} onChange={(e) => setFinalScore(e.target.value)} placeholder="Only if FINAL" />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Status</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as any)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={status} onChange={(e) => setStatus(e.target.value as any)}>
               <option value="OPEN">OPEN</option>
               <option value="FINAL">FINAL</option>
             </select>
@@ -435,11 +378,7 @@ export default function BetsPage() {
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Result</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={result}
-              onChange={(e) => setResult(e.target.value as any)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={result} onChange={(e) => setResult(e.target.value as any)}>
               <option value="OPEN">OPEN</option>
               <option value="WIN">WIN</option>
               <option value="LOSS">LOSS</option>
@@ -451,11 +390,7 @@ export default function BetsPage() {
 
           <div className="space-y-1 md:col-span-2">
             <div className="text-sm font-medium">Notes</div>
-            <textarea
-              className="border rounded px-2 py-2 w-full min-h-[80px]"
-              value={notes}
-              onChange={(e) => setNotes(e.target.value)}
-            />
+            <textarea className="border rounded px-2 py-2 w-full min-h-[80px]" value={notes} onChange={(e) => setNotes(e.target.value)} />
           </div>
         </div>
 
@@ -477,21 +412,12 @@ export default function BetsPage() {
         <div className="grid gap-2 md:grid-cols-3">
           <div className="space-y-1">
             <div className="text-sm font-medium">Search</div>
-            <input
-              className="border rounded px-2 py-2 w-full"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="team, capper, notes…"
-            />
+            <input className="border rounded px-2 py-2 w-full" value={q} onChange={(e) => setQ(e.target.value)} placeholder="team, capper, notes…" />
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Status</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as any)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as any)}>
               <option value="ALL">All</option>
               <option value="OPEN">OPEN</option>
               <option value="FINAL">FINAL</option>
@@ -500,11 +426,7 @@ export default function BetsPage() {
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Result</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={resultFilter}
-              onChange={(e) => setResultFilter(e.target.value as any)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={resultFilter} onChange={(e) => setResultFilter(e.target.value as any)}>
               <option value="ALL">All</option>
               <option value="OPEN">OPEN</option>
               <option value="WIN">WIN</option>
@@ -517,32 +439,20 @@ export default function BetsPage() {
 
           <div className="space-y-1">
             <div className="text-sm font-medium">Capper</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={capperFilter}
-              onChange={(e) => setCapperFilter(e.target.value)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={capperFilter} onChange={(e) => setCapperFilter(e.target.value)}>
               <option value="ALL">All</option>
               {cappers.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
+                <option key={c} value={c}>{c}</option>
               ))}
             </select>
           </div>
 
           <div className="space-y-1">
             <div className="text-sm font-medium">League</div>
-            <select
-              className="border rounded px-2 py-2 w-full"
-              value={leagueFilter}
-              onChange={(e) => setLeagueFilter(e.target.value)}
-            >
+            <select className="border rounded px-2 py-2 w-full" value={leagueFilter} onChange={(e) => setLeagueFilter(e.target.value)}>
               <option value="ALL">All</option>
               {leagues.map((l) => (
-                <option key={l} value={l}>
-                  {l}
-                </option>
+                <option key={l} value={l}>{l}</option>
               ))}
             </select>
           </div>
@@ -550,18 +460,8 @@ export default function BetsPage() {
           <div className="space-y-1">
             <div className="text-sm font-medium">Date range</div>
             <div className="grid grid-cols-2 gap-2">
-              <input
-                className="border rounded px-2 py-2 w-full"
-                type="date"
-                value={dateFrom}
-                onChange={(e) => setDateFrom(e.target.value)}
-              />
-              <input
-                className="border rounded px-2 py-2 w-full"
-                type="date"
-                value={dateTo}
-                onChange={(e) => setDateTo(e.target.value)}
-              />
+              <input className="border rounded px-2 py-2 w-full" type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+              <input className="border rounded px-2 py-2 w-full" type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
             </div>
           </div>
         </div>
@@ -588,10 +488,7 @@ export default function BetsPage() {
       <section className="space-y-2">
         <div className="flex items-end justify-between gap-3 flex-wrap">
           <h2 className="font-semibold">Ledger ({filtered.length})</h2>
-          <button
-            onClick={fetchAllBets}
-            className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300"
-          >
+          <button onClick={fetchAllBets} className="px-3 py-1 bg-gray-200 rounded hover:bg-gray-300">
             Refresh
           </button>
         </div>
