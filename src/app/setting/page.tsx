@@ -29,7 +29,7 @@ export default function SettingsPage() {
       <section className="border rounded p-4 space-y-2">
         <h2 className="font-semibold">Units</h2>
         <div className="text-sm text-gray-600">
-          This is used only to display Net $ equivalents in the UI.
+          Used only to display Net $ equivalents in the UI.
         </div>
 
         <div className="max-w-sm space-y-2">
@@ -41,7 +41,10 @@ export default function SettingsPage() {
             placeholder="16"
           />
 
-          <button onClick={save} className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
+          <button
+            onClick={save}
+            className="px-3 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
+          >
             Save
           </button>
 
@@ -49,11 +52,15 @@ export default function SettingsPage() {
         </div>
       </section>
 
+      {/* ✅ THIS IS WHERE THE LINK GOES */}
       <section className="border rounded p-4 space-y-2 bg-gray-50">
-        <h2 className="font-semibold">AI note</h2>
+        <h2 className="font-semibold">Leagues</h2>
         <div className="text-sm text-gray-700">
-          The Assistant page is currently “AI-lite” (no external API). If you want real AI later, we’ll add a server route and a BYO-key model option.
+          Register leagues once (via ESPN scoreboard URL + aliases). Then slips and manual bets can be standardized automatically.
         </div>
+        <a className="text-blue-600 underline" href="/settings/leagues">
+          Manage League Registry →
+        </a>
       </section>
     </main>
   );
