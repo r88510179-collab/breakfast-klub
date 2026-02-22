@@ -138,14 +138,29 @@ export default function SlipScanner({
         body: fd,
       });
 
-      const out = await res.json().catch(() => ({}));
+      const rawText = await res.text();
+      let out: any = {};
+      try {
+        out = rawText ? JSON.parse(rawText) : {};
+      } catch {
+        out = { raw: rawText };
+      }
+
       if (!res.ok) {
-        setErr(out?.error ?? "Scan failed");
+        setErr(
+          out?.error
+            ? `${out.error} (HTTP ${res.status})`
+            : `Scan failed (HTTP ${res.status}) ${
+                typeof out?.raw === "string" ? out.raw.slice(0, 300) : ""
+              }`
+        );
         return;
       }
 
-      setIssues(out?.issues ?? []);
+      setIssues(Array.isArray(out?.issues) ? out.issues : []);
       setRows(normalizeExtracted(out?.extracted));
+    } catch (e: any) {
+      setErr(e?.message ?? "Scan request crashed");
     } finally {
       setBusy(false);
     }
@@ -162,11 +177,8 @@ export default function SlipScanner({
 
     setBusy(true);
     try {
-      // ✅ THIS BLOCK GOES HERE (before building payload)
-      const resolveResults = await resolveLeagues(
-        rows.map((r) => ({ league_text: r.league }))
-      );
-
+      // Resolve leagues for all rows before insert
+      const resolveResults = await resolveLeagues(rows.map((r) => ({ league_text: r.league })));
       const resolvedByIndex = resolveResults.map((rr) => rr.resolved);
 
       const unresolved = resolvedByIndex
@@ -181,7 +193,6 @@ export default function SlipScanner({
         return;
       }
 
-      // ✅ THIS PAYLOAD BUILDER GOES HERE (uses resolvedByIndex)
       const payload = rows.map((r, idx) => {
         const resolved = resolvedByIndex[idx]!;
         const lineNum = r.line.trim() ? Number(r.line) : null;
@@ -192,7 +203,7 @@ export default function SlipScanner({
           date: r.date || todayISO(),
           capper: r.capper.trim(),
 
-          // Standardized league fields
+          // standardized league fields
           sport_key: resolved.sport_key,
           league_key: resolved.league_key,
           league_abbrev: resolved.league_abbrev,
@@ -222,6 +233,8 @@ export default function SlipScanner({
       }
 
       setFile(null);
+      setBook("");
+      setSlipRef("");
       setIssues([]);
       setRows([]);
       await onAdded();
@@ -242,12 +255,20 @@ export default function SlipScanner({
       <div className="grid gap-2 md:grid-cols-3">
         <div className="space-y-1">
           <div className="text-sm font-medium">Book (optional)</div>
-          <input className="border rounded px-2 py-2 w-full" value={book} onChange={(e) => setBook(e.target.value)} />
+          <input
+            className="border rounded px-2 py-2 w-full"
+            value={book}
+            onChange={(e) => setBook(e.target.value)}
+          />
         </div>
 
         <div className="space-y-1">
           <div className="text-sm font-medium">Slip Ref (optional)</div>
-          <input className="border rounded px-2 py-2 w-full" value={slipRef} onChange={(e) => setSlipRef(e.target.value)} />
+          <input
+            className="border rounded px-2 py-2 w-full"
+            value={slipRef}
+            onChange={(e) => setSlipRef(e.target.value)}
+          />
         </div>
 
         <div className="space-y-1">
@@ -288,7 +309,9 @@ export default function SlipScanner({
         </button>
       </div>
 
-      {err ? <div className="border border-red-300 bg-red-50 text-red-800 rounded p-3">{err}</div> : null}
+      {err ? (
+        <div className="border border-red-300 bg-red-50 text-red-800 rounded p-3">{err}</div>
+      ) : null}
 
       {issues.length ? (
         <div className="border rounded p-3 bg-yellow-50 space-y-1">
@@ -448,7 +471,8 @@ export default function SlipScanner({
           </datalist>
 
           <div className="text-xs text-gray-600">
-            Required before insert: date, capper, league, market, play. If a league isn’t registered yet, the insert will be blocked.
+            Required before insert: date, capper, league, market, play. If a league isn’t registered
+            yet, the insert will be blocked.
           </div>
         </div>
       ) : null}
