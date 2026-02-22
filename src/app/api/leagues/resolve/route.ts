@@ -2,22 +2,20 @@ import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
 type ResolveItem = {
-  league_text?: string;      // "EPL", "NBA", "College Baseball", etc
-  sport_key?: string;        // "soccer", "basketball", "baseball", "tennis", ...
-  league_key?: string;       // "eng.1", "nba", "college-baseball", "atp", ...
-  scoreboard_url?: string;   // optional: paste full ESPN scoreboard URL
+  league_text?: string;
+  sport_key?: string;
+  league_key?: string;
+  scoreboard_url?: string;
 };
 
-type Resolved = {
+type RegistryRow = {
   sport_key: string;
   league_key: string;
-  league_abbrev: string | null;
-  league_name: string | null;
-  source: "registry" | "espn";
+  league_abbrev?: string | null;
+  league_name?: string | null;
   scoreboard_url: string;
+  aliases?: string[] | string | null;
 };
-
-type Candidate = Omit<Resolved, "source"> & { source: "candidate" };
 
 function getBearerToken(req: Request): string {
   const h = req.headers.get("authorization") || "";
@@ -25,229 +23,177 @@ function getBearerToken(req: Request): string {
   return "";
 }
 
-function norm(s: string) {
-  return s.toLowerCase().replace(/[^a-z0-9.]+/g, " ").trim();
+function norm(s: any) {
+  return String(s ?? "")
+    .toLowerCase()
+    .trim()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ");
 }
 
-function parseESPNScoreboardUrl(u: string): { sport_key: string; league_key: string } | null {
-  try {
-    const url = new URL(u);
-    const m = url.pathname.match(/\/sports\/([^/]+)\/([^/]+)\/scoreboard\/?$/i);
-    if (!m) return null;
-    return { sport_key: m[1], league_key: m[2] };
-  } catch {
-    return null;
+function parseAliases(v: any): string[] {
+  if (!v) return [];
+  if (Array.isArray(v)) return v.map(String).filter(Boolean);
+  if (typeof v === "string") {
+    // allow comma-separated aliases in DB
+    return v
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
   }
+  return [];
 }
 
-async function fetchJson(url: string) {
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`Fetch failed ${res.status} for ${url}`);
-  return await res.json();
+// Built-in fallback map so you can scan immediately even before populating full registry
+const BUILTIN: RegistryRow[] = [
+  // Major US
+  { sport_key: "basketball", league_key: "nba", league_abbrev: "NBA", league_name: "National Basketball Association", scoreboard_url: "https://www.espn.com/nba/scoreboard", aliases: ["nba"] },
+  { sport_key: "basketball", league_key: "wnba", league_abbrev: "WNBA", league_name: "WNBA", scoreboard_url: "https://www.espn.com/wnba/scoreboard", aliases: ["wnba"] },
+  { sport_key: "basketball", league_key: "ncaam", league_abbrev: "NCAAM", league_name: "NCAA Men's Basketball", scoreboard_url: "https://www.espn.com/mens-college-basketball/scoreboard", aliases: ["ncaam", "ncaab", "ncaa men", "college basketball men", "mens college basketball"] },
+  { sport_key: "basketball", league_key: "ncaaw", league_abbrev: "NCAAW", league_name: "NCAA Women's Basketball", scoreboard_url: "https://www.espn.com/womens-college-basketball/scoreboard", aliases: ["ncaaw", "wcbb", "womens college basketball", "ncaa women"] },
+
+  { sport_key: "football", league_key: "nfl", league_abbrev: "NFL", league_name: "National Football League", scoreboard_url: "https://www.espn.com/nfl/scoreboard", aliases: ["nfl"] },
+  { sport_key: "football", league_key: "ncaaf", league_abbrev: "NCAAF", league_name: "NCAA Football", scoreboard_url: "https://www.espn.com/college-football/scoreboard", aliases: ["ncaaf", "cfb", "college football"] },
+
+  { sport_key: "baseball", league_key: "mlb", league_abbrev: "MLB", league_name: "Major League Baseball", scoreboard_url: "https://www.espn.com/mlb/scoreboard", aliases: ["mlb"] },
+  { sport_key: "baseball", league_key: "ncaa_baseball", league_abbrev: "CBASE", league_name: "NCAA Baseball", scoreboard_url: "https://www.espn.com/college-baseball/scoreboard", aliases: ["college baseball", "ncaa baseball", "cbase"] },
+
+  { sport_key: "hockey", league_key: "nhl", league_abbrev: "NHL", league_name: "National Hockey League", scoreboard_url: "https://www.espn.com/nhl/scoreboard", aliases: ["nhl"] },
+
+  // Soccer (common)
+  { sport_key: "soccer", league_key: "epl", league_abbrev: "EPL", league_name: "English Premier League", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/eng.1", aliases: ["epl", "premier league", "english premier league"] },
+  { sport_key: "soccer", league_key: "laliga", league_abbrev: "LALIGA", league_name: "LaLiga", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/esp.1", aliases: ["laliga", "la liga"] },
+  { sport_key: "soccer", league_key: "serie_a", league_abbrev: "SERIEA", league_name: "Serie A", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/ita.1", aliases: ["serie a", "seriea"] },
+  { sport_key: "soccer", league_key: "bundesliga", league_abbrev: "BUND", league_name: "Bundesliga", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/ger.1", aliases: ["bundesliga", "bund"] },
+  { sport_key: "soccer", league_key: "ligue_1", league_abbrev: "L1", league_name: "Ligue 1", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/fra.1", aliases: ["ligue 1", "ligue1"] },
+  { sport_key: "soccer", league_key: "mls", league_abbrev: "MLS", league_name: "Major League Soccer", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/usa.1", aliases: ["mls"] },
+  { sport_key: "soccer", league_key: "uefa_cl", league_abbrev: "UCL", league_name: "UEFA Champions League", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/uefa.champions", aliases: ["ucl", "uefa champions league", "champions league"] },
+  { sport_key: "soccer", league_key: "uefa_el", league_abbrev: "UEL", league_name: "UEFA Europa League", scoreboard_url: "https://www.espn.com/soccer/scoreboard/_/league/uefa.europa", aliases: ["uel", "uefa europa league", "europa league"] },
+
+  // Tennis
+  { sport_key: "tennis", league_key: "atp", league_abbrev: "ATP", league_name: "ATP", scoreboard_url: "https://www.espn.com/tennis/scoreboard", aliases: ["atp", "mens tennis"] },
+  { sport_key: "tennis", league_key: "wta", league_abbrev: "WTA", league_name: "WTA", scoreboard_url: "https://www.espn.com/tennis/scoreboard", aliases: ["wta", "womens tennis"] },
+  { sport_key: "tennis", league_key: "tennis", league_abbrev: "TENNIS", league_name: "Tennis", scoreboard_url: "https://www.espn.com/tennis/scoreboard", aliases: ["tennis"] },
+
+  // Combat / misc
+  { sport_key: "mma", league_key: "ufc", league_abbrev: "UFC", league_name: "UFC", scoreboard_url: "https://www.espn.com/mma/scoreboard", aliases: ["ufc", "mma"] },
+  { sport_key: "boxing", league_key: "boxing", league_abbrev: "BOXING", league_name: "Boxing", scoreboard_url: "https://www.espn.com/boxing/", aliases: ["boxing"] },
+  { sport_key: "golf", league_key: "pga", league_abbrev: "PGA", league_name: "PGA Tour", scoreboard_url: "https://www.espn.com/golf/leaderboard", aliases: ["pga", "golf", "pga tour"] },
+
+  // Olympic / broad
+  { sport_key: "olympics", league_key: "olympics", league_abbrev: "OLY", league_name: "Olympics", scoreboard_url: "https://www.espn.com/olympics/", aliases: ["olympics", "olympic"] },
+];
+
+function rowTokens(r: RegistryRow): string[] {
+  return [
+    r.sport_key,
+    r.league_key,
+    r.league_abbrev ?? "",
+    r.league_name ?? "",
+    ...(parseAliases(r.aliases) ?? []),
+  ]
+    .map(norm)
+    .filter(Boolean);
 }
 
-function scoreboardUrl(sport_key: string, league_key: string) {
-  // ESPN pattern used broadly for scoreboards :contentReference[oaicite:1]{index=1}
-  return `https://site.api.espn.com/apis/site/v2/sports/${sport_key}/${league_key}/scoreboard`;
-}
+function matchRegistry(rows: RegistryRow[], input: ResolveItem) {
+  const raw = input.league_text || input.league_key || "";
+  const q = norm(raw);
+  if (!q) {
+    return { resolved: null, candidates: [] as any[] };
+  }
 
-async function getLeagueMetaFromScoreboard(sport_key: string, league_key: string) {
-  const url = scoreboardUrl(sport_key, league_key);
-  const j = await fetchJson(url);
-  const lg = Array.isArray(j?.leagues) ? j.leagues[0] : null;
+  // Exact-ish match first
+  const exact = rows.find((r) => rowTokens(r).includes(q));
+
+  // Candidate contains match
+  const candidates = rows
+    .filter((r) => rowTokens(r).some((t) => t.includes(q) || q.includes(t)))
+    .slice(0, 8)
+    .map((r) => ({
+      sport_key: r.sport_key,
+      league_key: r.league_key,
+      league_abbrev: r.league_abbrev ?? null,
+      league_name: r.league_name ?? null,
+      scoreboard_url: r.scoreboard_url,
+      source: "candidate" as const,
+    }));
+
+  const winner = exact ?? (candidates.length === 1
+    ? rows.find((r) => r.league_key === candidates[0].league_key && r.sport_key === candidates[0].sport_key)
+    : null);
+
+  if (!winner) return { resolved: null, candidates };
 
   return {
-    scoreboard_url: url,
-    league_abbrev: lg?.abbreviation ?? null,
-    league_name: lg?.name ?? null,
+    resolved: {
+      sport_key: winner.sport_key,
+      league_key: winner.league_key,
+      league_abbrev: winner.league_abbrev ?? null,
+      league_name: winner.league_name ?? null,
+      scoreboard_url: winner.scoreboard_url,
+      source: "registry" as const,
+    },
+    candidates,
   };
 }
 
-async function fetchESPNLeagueIndex(): Promise<Array<{ sport_key: string; league_key: string; name?: string; abbrev?: string }>> {
-  // This endpoint returns the sport tree (sports -> leagues). It’s large but stable enough for lookups.
-  const url = "https://site.api.espn.com/apis/site/v2/sports";
-  const j = await fetchJson(url);
-
-  const out: Array<{ sport_key: string; league_key: string; name?: string; abbrev?: string }> = [];
-
-  // Walk possible structures
-  const sports = j?.sports ?? j?.leagues ?? j?.items ?? [];
-  const stack: any[] = Array.isArray(sports) ? [...sports] : [];
-
-  while (stack.length) {
-    const node = stack.pop();
-
-    // Sport nodes often have "slug" and "leagues"
-    const sport_slug = node?.slug;
-    const leagues = node?.leagues;
-
-    if (sport_slug && Array.isArray(leagues)) {
-      for (const l of leagues) {
-        const league_slug = l?.slug;
-        if (league_slug) {
-          out.push({
-            sport_key: sport_slug,
-            league_key: league_slug,
-            name: l?.name,
-            abbrev: l?.abbreviation,
-          });
-        }
-      }
-    }
-
-    // Recurse
-    for (const k of ["children", "sports", "items"]) {
-      if (Array.isArray(node?.[k])) stack.push(...node[k]);
-    }
-  }
-
-  return out;
-}
-
-function scoreMatch(q: string, name?: string, abbrev?: string, league_key?: string) {
-  const nq = norm(q);
-  const nname = norm(name ?? "");
-  const nabbr = norm(abbrev ?? "");
-  const nkey = norm(league_key ?? "");
-
-  let score = 0;
-  if (nabbr && nabbr === nq) score += 100;
-  if (nkey && nkey === nq) score += 90;
-
-  if (nname && nname.includes(nq)) score += 60;
-  if (nkey && nkey.includes(nq)) score += 55;
-  if (nabbr && nabbr.includes(nq)) score += 50;
-
-  return score;
-}
-
 export async function POST(req: Request) {
-  const token = getBearerToken(req);
-  if (!token) return NextResponse.json({ error: "Missing Authorization Bearer token" }, { status: 401 });
+  try {
+    const token = getBearerToken(req);
+    if (!token) return NextResponse.json({ error: "Missing Authorization Bearer token" }, { status: 401 });
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    if (!url || !anon) return NextResponse.json({ error: "Missing Supabase env vars" }, { status: 500 });
 
-  const supabase = createClient(url, anon, {
-    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-
-  const { data: userData, error: userErr } = await supabase.auth.getUser();
-  if (userErr || !userData?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-
-  const body = await req.json().catch(() => ({}));
-  const items: ResolveItem[] = Array.isArray(body?.items) ? body.items : [body];
-
-  // Load user registry for alias matching
-  const { data: registry, error: regErr } = await supabase
-    .from("league_registry")
-    .select("sport_key, league_key, league_abbrev, league_name, aliases");
-
-  if (regErr) return NextResponse.json({ error: regErr.message }, { status: 500 });
-
-  const reg = registry ?? [];
-
-  // Cache the ESPN index in-memory (per server instance)
-  const g: any = globalThis as any;
-  if (!g.__espnLeagueIndex || (Date.now() - g.__espnLeagueIndex.ts) > 6 * 60 * 60 * 1000) {
-    g.__espnLeagueIndex = { ts: Date.now(), data: await fetchESPNLeagueIndex().catch(() => []) };
-  }
-  const espnIndex: any[] = g.__espnLeagueIndex.data ?? [];
-
-  const results = [];
-  for (const it of items) {
-    // Normalize input into sport/league keys if possible
-    let sport_key = (it.sport_key ?? "").trim();
-    let league_key = (it.league_key ?? "").trim();
-    const league_text = (it.league_text ?? "").trim();
-
-    if ((!sport_key || !league_key) && it.scoreboard_url) {
-      const p = parseESPNScoreboardUrl(it.scoreboard_url);
-      if (p) {
-        sport_key = p.sport_key;
-        league_key = p.league_key;
-      }
-    }
-
-    // 1) If keys provided, resolve directly via ESPN scoreboard meta
-    if (sport_key && league_key) {
-      const meta = await getLeagueMetaFromScoreboard(sport_key, league_key).catch(() => null);
-      if (meta) {
-        results.push({
-          input: it,
-          resolved: {
-            sport_key,
-            league_key,
-            league_abbrev: meta.league_abbrev,
-            league_name: meta.league_name,
-            source: "espn",
-            scoreboard_url: meta.scoreboard_url,
-          } satisfies Resolved,
-          candidates: [],
-        });
-        continue;
-      }
-    }
-
-    // 2) Try registry alias match (fast)
-    if (league_text) {
-      const q = norm(league_text);
-      const hit = reg.find((r: any) => {
-        const aliases: string[] = Array.isArray(r.aliases) ? r.aliases : [];
-        const pool = [r.league_abbrev, r.league_name, r.league_key, r.sport_key, ...aliases].filter(Boolean).map(norm);
-        return pool.includes(q);
-      });
-
-      if (hit) {
-        const meta = await getLeagueMetaFromScoreboard(hit.sport_key, hit.league_key).catch(() => null);
-        results.push({
-          input: it,
-          resolved: {
-            sport_key: hit.sport_key,
-            league_key: hit.league_key,
-            league_abbrev: meta?.league_abbrev ?? hit.league_abbrev ?? null,
-            league_name: meta?.league_name ?? hit.league_name ?? null,
-            source: "registry",
-            scoreboard_url: meta?.scoreboard_url ?? scoreboardUrl(hit.sport_key, hit.league_key),
-          } satisfies Resolved,
-          candidates: [],
-        });
-        continue;
-      }
-    }
-
-    // 3) ESPN candidates (wide coverage)
-    const candidates: Candidate[] = [];
-    if (league_text) {
-      const scored = espnIndex
-        .map((x: any) => ({
-          ...x,
-          score: scoreMatch(league_text, x.name, x.abbrev, x.league_key),
-        }))
-        .filter((x: any) => x.score > 0)
-        .sort((a: any, b: any) => b.score - a.score)
-        .slice(0, 10);
-
-      for (const c of scored) {
-        const meta = await getLeagueMetaFromScoreboard(c.sport_key, c.league_key).catch(() => null);
-        candidates.push({
-          sport_key: c.sport_key,
-          league_key: c.league_key,
-          league_abbrev: meta?.league_abbrev ?? c.abbrev ?? null,
-          league_name: meta?.league_name ?? c.name ?? null,
-          scoreboard_url: meta?.scoreboard_url ?? scoreboardUrl(c.sport_key, c.league_key),
-          source: "candidate",
-        });
-      }
-    }
-
-    results.push({
-      input: it,
-      resolved: null,
-      candidates,
+    const supabase = createClient(url, anon, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      global: { headers: { Authorization: `Bearer ${token}` } },
     });
-  }
 
-  return NextResponse.json({ results });
+    const { data: userData, error: userErr } = await supabase.auth.getUser();
+    if (userErr || !userData?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+    const body = await req.json().catch(() => ({}));
+    const items = Array.isArray(body?.items) ? (body.items as ResolveItem[]) : [];
+
+    // Try DB-backed registry first (optional)
+    let registryRows: RegistryRow[] = [];
+    try {
+      const { data, error } = await supabase
+        .from("league_registry")
+        .select("sport_key, league_key, league_abbrev, league_name, scoreboard_url, aliases")
+        .limit(1000);
+
+      if (!error && Array.isArray(data)) {
+        registryRows = (data as any[]).map((r) => ({
+          sport_key: String(r.sport_key),
+          league_key: String(r.league_key),
+          league_abbrev: r.league_abbrev ?? null,
+          league_name: r.league_name ?? null,
+          scoreboard_url: String(r.scoreboard_url),
+          aliases: r.aliases ?? null,
+        }));
+      }
+    } catch {
+      // ignore and fallback
+    }
+
+    const allRows = [...registryRows, ...BUILTIN];
+
+    const results = items.map((input) => {
+      const m = matchRegistry(allRows, input);
+      return {
+        input,
+        resolved: m.resolved,
+        candidates: m.candidates,
+      };
+    });
+
+    return NextResponse.json({ results });
+  } catch (e: any) {
+    return NextResponse.json({ error: e?.message ?? "Resolve failed" }, { status: 500 });
+  }
 }
