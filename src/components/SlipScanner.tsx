@@ -4,6 +4,16 @@ import { useMemo, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { resolveLeagues } from "@/lib/leagues/client";
 
+type ProposedBetMeta = {
+  ticket_type?: "SINGLE" | "PARLAY";
+  parlay_group_id?: string;
+  parlay_leg_index?: number;
+  parlay_total_legs?: number;
+  parlay_label?: string | null;
+  parlay_odds?: string | number | null;
+  original_market?: string | null;
+};
+
 type ProposedBet = {
   date: string;
   capper: string;
@@ -18,6 +28,8 @@ type ProposedBet = {
 
   opponent: string;
   notes: string;
+
+  _meta?: ProposedBetMeta;
 };
 
 function todayISO() {
@@ -27,6 +39,27 @@ function todayISO() {
 function asStr(v: any) {
   if (v === null || v === undefined) return "";
   return String(v);
+}
+
+function safeNum(v: any): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function makeParlayGroupId() {
+  return `PARLAY-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isLikelyParlay(extracted: any, bets: any[]) {
+  const ticketType = String(extracted?.ticket_type ?? "").toUpperCase();
+  if (ticketType === "PARLAY") return true;
+
+  // If provider doesn't return ticket_type yet, use a fallback heuristic:
+  // multiple rows from one uploaded slip usually means parlay/SGP/builder.
+  // (You can refine later when you add "multi-slip image" support.)
+  if (bets.length > 1) return true;
+
+  return false;
 }
 
 export default function SlipScanner({
@@ -74,27 +107,84 @@ export default function SlipScanner({
         units: "1",
         opponent: "",
         notes: "",
+        _meta: { ticket_type: "SINGLE" },
       },
     ]);
   }
 
   function normalizeExtracted(extracted: any): ProposedBet[] {
     const bets = Array.isArray(extracted?.bets) ? extracted.bets : [];
-    return bets.map((b: any) => ({
-      date: b?.date ? asStr(b.date) : todayISO(),
-      capper: b?.capper ? asStr(b.capper) : capperOptions[0] || "Personal",
-      league: b?.league ? asStr(b.league) : "",
-      market: b?.market ? asStr(b.market) : "",
-      play: b?.play ? asStr(b.play) : "",
 
-      selection: b?.selection ? asStr(b.selection) : "",
-      line: b?.line === null || b?.line === undefined ? "" : asStr(b.line),
-      odds: b?.odds === null || b?.odds === undefined ? "" : asStr(b.odds),
-      units: b?.units === null || b?.units === undefined ? "1" : asStr(b.units),
+    if (!bets.length) return [];
 
-      opponent: b?.opponent ? asStr(b.opponent) : "",
-      notes: b?.notes ? asStr(b.notes) : "",
-    }));
+    const detectedParlay = isLikelyParlay(extracted, bets);
+
+    // Try to use model-provided group id if present, otherwise create one
+    const groupId =
+      asStr(extracted?.parlay_group_id || extracted?.group_id || "").trim() || makeParlayGroupId();
+
+    const parlayLabel =
+      asStr(extracted?.parlay_label || extracted?.ticket_label || extracted?.bet_type || "").trim() ||
+      null;
+
+    const parlayOddsRaw = extracted?.parlay_odds ?? extracted?.combined_odds ?? null;
+    const parlayOdds =
+      parlayOddsRaw === null || parlayOddsRaw === undefined ? null : asStr(parlayOddsRaw);
+
+    const totalLegs = detectedParlay ? bets.length : 1;
+
+    return bets.map((b: any, idx: number) => {
+      const originalMarket = b?.market ? asStr(b.market) : "";
+
+      // If parlay, make it visibly show as PARLAY in the ledger, while keeping leg market in metadata
+      const displayMarket = detectedParlay ? "Parlay" : originalMarket;
+
+      const rowNotesFromModel = b?.notes ? asStr(b.notes) : "";
+
+      const autoParlayNote = detectedParlay
+        ? [
+            parlayLabel ? `Parlay=${parlayLabel}` : "Parlay",
+            `Leg ${idx + 1}/${totalLegs}`,
+            originalMarket ? `LegMarket=${originalMarket}` : null,
+            parlayOdds ? `ParlayOdds=${parlayOdds}` : null,
+          ]
+            .filter(Boolean)
+            .join(" | ")
+        : "";
+
+      const mergedNotes = [rowNotesFromModel, autoParlayNote].filter(Boolean).join(" | ");
+
+      return {
+        date: b?.date ? asStr(b.date) : todayISO(),
+        capper: b?.capper ? asStr(b.capper) : capperOptions[0] || "Personal",
+        league: b?.league ? asStr(b.league) : "",
+        market: displayMarket,
+        play: b?.play ? asStr(b.play) : "",
+
+        selection: b?.selection ? asStr(b.selection) : "",
+        line: b?.line === null || b?.line === undefined ? "" : asStr(b.line),
+        odds: b?.odds === null || b?.odds === undefined ? "" : asStr(b.odds),
+        units: b?.units === null || b?.units === undefined ? "1" : asStr(b.units),
+
+        opponent: b?.opponent ? asStr(b.opponent) : "",
+        notes: mergedNotes,
+
+        _meta: detectedParlay
+          ? {
+              ticket_type: "PARLAY",
+              parlay_group_id: groupId,
+              parlay_leg_index: idx + 1,
+              parlay_total_legs: totalLegs,
+              parlay_label: parlayLabel,
+              parlay_odds,
+              original_market: originalMarket || null,
+            }
+          : {
+              ticket_type: "SINGLE",
+              original_market: originalMarket || null,
+            },
+      };
+    });
   }
 
   function validateRows(rs: ProposedBet[]) {
@@ -138,29 +228,14 @@ export default function SlipScanner({
         body: fd,
       });
 
-      const rawText = await res.text();
-      let out: any = {};
-      try {
-        out = rawText ? JSON.parse(rawText) : {};
-      } catch {
-        out = { raw: rawText };
-      }
-
+      const out = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setErr(
-          out?.error
-            ? `${out.error} (HTTP ${res.status})`
-            : `Scan failed (HTTP ${res.status}) ${
-                typeof out?.raw === "string" ? out.raw.slice(0, 300) : ""
-              }`
-        );
+        setErr(out?.error ?? "Scan failed");
         return;
       }
 
-      setIssues(Array.isArray(out?.issues) ? out.issues : []);
+      setIssues(out?.issues ?? []);
       setRows(normalizeExtracted(out?.extracted));
-    } catch (e: any) {
-      setErr(e?.message ?? "Scan request crashed");
     } finally {
       setBusy(false);
     }
@@ -177,7 +252,7 @@ export default function SlipScanner({
 
     setBusy(true);
     try {
-      // Resolve leagues for all rows before insert
+      // Resolve leagues before insert
       const resolveResults = await resolveLeagues(rows.map((r) => ({ league_text: r.league })));
       const resolvedByIndex = resolveResults.map((rr) => rr.resolved);
 
@@ -199,30 +274,55 @@ export default function SlipScanner({
         const oddsNum = r.odds.trim() ? Number(r.odds) : null;
         const unitsNum = r.units.trim() ? Number(r.units) : 1;
 
+        const isParlay = r._meta?.ticket_type === "PARLAY";
+
+        const extraNotes: string[] = [];
+        if (isParlay && r._meta?.original_market) {
+          extraNotes.push(`Original leg market=${r._meta.original_market}`);
+        }
+
+        const finalNotes = [r.notes.trim(), ...extraNotes].filter(Boolean).join(" | ");
+
         return {
           date: r.date || todayISO(),
           capper: r.capper.trim(),
 
-          // standardized league fields
+          // Standardized league fields
           sport_key: resolved.sport_key,
           league_key: resolved.league_key,
           league_abbrev: resolved.league_abbrev,
           league_name: resolved.league_name,
           league: resolved.league_abbrev ?? r.league.trim(),
 
-          market: r.market.trim(),
+          // Important: visible classification fix
+          market: isParlay ? "Parlay" : r.market.trim(),
+
           play: r.play.trim(),
           selection: r.selection.trim() || null,
           line: Number.isFinite(lineNum as any) ? lineNum : null,
           odds: Number.isFinite(oddsNum as any) ? oddsNum : null,
           units: Number.isFinite(unitsNum as any) ? unitsNum : 1,
           opponent: r.opponent.trim() || null,
-          notes: r.notes.trim() || null,
+          notes: finalNotes || null,
           book: book.trim() || null,
           slip_ref: slipRef.trim() || null,
           status: "OPEN",
           result: "OPEN",
-          ai_meta: { source: "slip_scan" },
+
+          ai_meta: {
+            source: "slip_scan",
+            ticket_type: r._meta?.ticket_type || "SINGLE",
+            parlay: isParlay
+              ? {
+                  group_id: r._meta?.parlay_group_id || null,
+                  leg_index: r._meta?.parlay_leg_index || null,
+                  total_legs: r._meta?.parlay_total_legs || null,
+                  label: r._meta?.parlay_label || null,
+                  parlay_odds: r._meta?.parlay_odds ?? null,
+                  original_market: r._meta?.original_market || null,
+                }
+              : null,
+          },
         };
       });
 
@@ -233,8 +333,6 @@ export default function SlipScanner({
       }
 
       setFile(null);
-      setBook("");
-      setSlipRef("");
       setIssues([]);
       setRows([]);
       await onAdded();
@@ -244,6 +342,19 @@ export default function SlipScanner({
       setBusy(false);
     }
   }
+
+  const parlayPreview = useMemo(() => {
+    const parlayRows = rows.filter((r) => r._meta?.ticket_type === "PARLAY");
+    if (!parlayRows.length) return null;
+
+    const groups = new Map<string, number>();
+    for (const r of parlayRows) {
+      const gid = r._meta?.parlay_group_id || "unknown";
+      groups.set(gid, (groups.get(gid) || 0) + 1);
+    }
+
+    return Array.from(groups.entries());
+  }, [rows]);
 
   return (
     <section className="border rounded p-4 space-y-3">
@@ -324,14 +435,28 @@ export default function SlipScanner({
         </div>
       ) : null}
 
+      {parlayPreview?.length ? (
+        <div className="border rounded p-3 bg-blue-50 text-sm">
+          <div className="font-semibold mb-1">Detected parlay grouping</div>
+          <ul className="list-disc ml-5">
+            {parlayPreview.map(([gid, count]) => (
+              <li key={gid}>
+                {gid}: {count} leg{count === 1 ? "" : "s"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
       {rows.length ? (
         <div className="space-y-2">
           <div className="font-semibold text-sm">Review & Edit extracted rows</div>
 
           <div className="overflow-auto border rounded">
-            <table className="min-w-[1100px] w-full border-collapse text-sm">
+            <table className="min-w-[1200px] w-full border-collapse text-sm">
               <thead className="border-b bg-gray-50">
                 <tr>
+                  <th className="p-2 text-left">Type</th>
                   <th className="p-2 text-left">Date</th>
                   <th className="p-2 text-left">Capper</th>
                   <th className="p-2 text-left">League</th>
@@ -348,118 +473,137 @@ export default function SlipScanner({
               </thead>
 
               <tbody>
-                {rows.map((r, i) => (
-                  <tr key={i} className="border-b align-top">
-                    <td className="p-2">
-                      <input
-                        type="date"
-                        className="border rounded px-2 py-1 w-[150px]"
-                        value={r.date}
-                        onChange={(e) => updateRow(i, "date", e.target.value)}
-                      />
-                    </td>
+                {rows.map((r, i) => {
+                  const isParlay = r._meta?.ticket_type === "PARLAY";
+                  const legLabel = isParlay
+                    ? `PARLAY ${r._meta?.parlay_leg_index}/${r._meta?.parlay_total_legs}`
+                    : "SINGLE";
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[180px]"
-                        list="capper-list"
-                        value={r.capper}
-                        onChange={(e) => updateRow(i, "capper", e.target.value)}
-                        placeholder="Select or type"
-                      />
-                    </td>
+                  return (
+                    <tr key={i} className="border-b align-top">
+                      <td className="p-2">
+                        <span
+                          className={`inline-block rounded px-2 py-1 text-xs font-semibold ${
+                            isParlay
+                              ? "bg-purple-100 text-purple-800"
+                              : "bg-gray-100 text-gray-700"
+                          }`}
+                        >
+                          {legLabel}
+                        </span>
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[140px]"
-                        value={r.league}
-                        onChange={(e) => updateRow(i, "league", e.target.value)}
-                        placeholder="NBA / EPL / ATP / CBASE …"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          type="date"
+                          className="border rounded px-2 py-1 w-[150px]"
+                          value={r.date}
+                          onChange={(e) => updateRow(i, "date", e.target.value)}
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[120px]"
-                        value={r.market}
-                        onChange={(e) => updateRow(i, "market", e.target.value)}
-                        placeholder="Spread / Total / ML"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[180px]"
+                          list="capper-list"
+                          value={r.capper}
+                          onChange={(e) => updateRow(i, "capper", e.target.value)}
+                          placeholder="Select or type"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[320px]"
-                        value={r.play}
-                        onChange={(e) => updateRow(i, "play", e.target.value)}
-                        placeholder="Team -3.5 / Over 2.5"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[140px]"
+                          value={r.league}
+                          onChange={(e) => updateRow(i, "league", e.target.value)}
+                          placeholder="NBA / EPL / ATP / CBASE …"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[90px]"
-                        value={r.odds}
-                        onChange={(e) => updateRow(i, "odds", e.target.value)}
-                        placeholder="-110"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[120px]"
+                          value={r.market}
+                          onChange={(e) => updateRow(i, "market", e.target.value)}
+                          placeholder="Parlay / Spread / Total / ML"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[70px]"
-                        value={r.units}
-                        onChange={(e) => updateRow(i, "units", e.target.value)}
-                        placeholder="1"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[320px]"
+                          value={r.play}
+                          onChange={(e) => updateRow(i, "play", e.target.value)}
+                          placeholder="Team -3.5 / Over 2.5"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[180px]"
-                        value={r.opponent}
-                        onChange={(e) => updateRow(i, "opponent", e.target.value)}
-                        placeholder="Opponent"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[90px]"
+                          value={r.odds}
+                          onChange={(e) => updateRow(i, "odds", e.target.value)}
+                          placeholder="-110"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[180px]"
-                        value={r.selection}
-                        onChange={(e) => updateRow(i, "selection", e.target.value)}
-                        placeholder="Over / Under / Team"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[70px]"
+                          value={r.units}
+                          onChange={(e) => updateRow(i, "units", e.target.value)}
+                          placeholder="1"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[90px]"
-                        value={r.line}
-                        onChange={(e) => updateRow(i, "line", e.target.value)}
-                        placeholder="157.5"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[180px]"
+                          value={r.opponent}
+                          onChange={(e) => updateRow(i, "opponent", e.target.value)}
+                          placeholder="Opponent"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <input
-                        className="border rounded px-2 py-1 w-[220px]"
-                        value={r.notes}
-                        onChange={(e) => updateRow(i, "notes", e.target.value)}
-                        placeholder="Any notes"
-                      />
-                    </td>
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[180px]"
+                          value={r.selection}
+                          onChange={(e) => updateRow(i, "selection", e.target.value)}
+                          placeholder="Over / Under / Team"
+                        />
+                      </td>
 
-                    <td className="p-2">
-                      <button
-                        onClick={() => removeRow(i)}
-                        className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[90px]"
+                          value={r.line}
+                          onChange={(e) => updateRow(i, "line", e.target.value)}
+                          placeholder="157.5"
+                        />
+                      </td>
+
+                      <td className="p-2">
+                        <input
+                          className="border rounded px-2 py-1 w-[260px]"
+                          value={r.notes}
+                          onChange={(e) => updateRow(i, "notes", e.target.value)}
+                          placeholder="Any notes"
+                        />
+                      </td>
+
+                      <td className="p-2">
+                        <button
+                          onClick={() => removeRow(i)}
+                          className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
