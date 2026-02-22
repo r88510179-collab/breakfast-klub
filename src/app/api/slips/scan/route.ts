@@ -1,8 +1,6 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
-export const runtime = "nodejs";
-
 type ExtractedBet = {
   date?: string;
   capper?: string;
@@ -10,19 +8,16 @@ type ExtractedBet = {
   market?: string;
   play?: string;
   selection?: string;
-  line?: number | string | null;
-  odds?: number | string | null;
-  units?: number | string | null;
+  line?: string | number | null;
+  odds?: string | number | null;
+  units?: string | number | null;
   opponent?: string;
   notes?: string;
 };
 
-type ScanResponse = {
-  issues: string[];
-  extracted: {
-    bets: ExtractedBet[];
-    meta?: Record<string, any>;
-  };
+type ScanResponseShape = {
+  bets: ExtractedBet[];
+  issues?: string[];
 };
 
 function getBearerToken(req: Request): string {
@@ -31,7 +26,7 @@ function getBearerToken(req: Request): string {
   return "";
 }
 
-function stripJsonFences(raw: string) {
+function stripJson(raw: string) {
   return raw
     .trim()
     .replace(/^```json\s*/i, "")
@@ -40,256 +35,239 @@ function stripJsonFences(raw: string) {
     .trim();
 }
 
-function tryParseJsonObject(raw: string): any | null {
-  const s = stripJsonFences(raw);
+function safeJsonParse(raw: string): any | null {
+  const s = stripJson(raw);
 
-  // direct parse
+  // Try direct parse
   try {
     return JSON.parse(s);
-  } catch {}
+  } catch {
+    // Try extracting largest object
+    const firstObj = s.indexOf("{");
+    const lastObj = s.lastIndexOf("}");
+    if (firstObj !== -1 && lastObj !== -1 && lastObj > firstObj) {
+      try {
+        return JSON.parse(s.slice(firstObj, lastObj + 1));
+      } catch {}
+    }
 
-  // extract first {...}
-  const firstObj = s.indexOf("{");
-  const lastObj = s.lastIndexOf("}");
-  if (firstObj >= 0 && lastObj > firstObj) {
-    try {
-      return JSON.parse(s.slice(firstObj, lastObj + 1));
-    } catch {}
-  }
-
-  // extract first [...]
-  const firstArr = s.indexOf("[");
-  const lastArr = s.lastIndexOf("]");
-  if (firstArr >= 0 && lastArr > firstArr) {
-    try {
-      return JSON.parse(s.slice(firstArr, lastArr + 1));
-    } catch {}
+    // Try extracting largest array
+    const firstArr = s.indexOf("[");
+    const lastArr = s.lastIndexOf("]");
+    if (firstArr !== -1 && lastArr !== -1 && lastArr > firstArr) {
+      try {
+        return JSON.parse(s.slice(firstArr, lastArr + 1));
+      } catch {}
+    }
   }
 
   return null;
 }
 
-function contentToString(content: any): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => {
-        if (typeof c === "string") return c;
-        if (c?.type === "text" && typeof c?.text === "string") return c.text;
-        return "";
-      })
-      .join("\n")
-      .trim();
-  }
-  return "";
-}
-
-function normalizeLine(v: any): string {
+function asStr(v: any) {
   if (v === null || v === undefined) return "";
-  return String(v).trim();
+  return String(v);
 }
 
-function normalizeOdds(v: any): string {
-  if (v === null || v === undefined) return "";
-  return String(v).trim();
+function todayISO() {
+  return new Date().toISOString().slice(0, 10);
 }
 
-function ensureArray<T>(v: any): T[] {
-  return Array.isArray(v) ? v : [];
-}
-
-function normalizeExtractedOutput(raw: any, fallbackCapper = "", fallbackDate = ""): ScanResponse {
-  const issues: string[] = ensureArray<string>(raw?.issues).map((x) => String(x));
-
-  let betsRaw = raw?.extracted?.bets ?? raw?.bets ?? [];
-  if (!Array.isArray(betsRaw)) betsRaw = [];
-
-  const bets: ExtractedBet[] = betsRaw.map((b: any) => ({
-    date: b?.date ? String(b.date) : fallbackDate || undefined,
-    capper: b?.capper ? String(b.capper) : fallbackCapper || undefined,
-    league: b?.league ? String(b.league) : "",
-    market: b?.market ? String(b.market) : "",
-    play: b?.play ? String(b.play) : "",
-    selection: b?.selection ? String(b.selection) : "",
+function normalizeBet(b: any): ExtractedBet {
+  return {
+    date: b?.date ? asStr(b.date) : todayISO(),
+    capper: b?.capper ? asStr(b.capper) : "",
+    league: b?.league ? asStr(b.league) : "",
+    market: b?.market ? asStr(b.market) : "",
+    play: b?.play ? asStr(b.play) : "",
+    selection: b?.selection ? asStr(b.selection) : "",
     line: b?.line ?? "",
     odds: b?.odds ?? "",
     units: b?.units ?? "",
-    opponent: b?.opponent ? String(b.opponent) : "",
-    notes: b?.notes ? String(b.notes) : "",
-  }));
-
-  return {
-    issues,
-    extracted: {
-      bets,
-      meta: raw?.extracted?.meta ?? raw?.meta ?? {},
-    },
+    opponent: b?.opponent ? asStr(b.opponent) : "",
+    notes: b?.notes ? asStr(b.notes) : "",
   };
 }
 
-function toDataUrl(file: File, bytes: Buffer): string {
-  const mime = file.type || "image/jpeg";
-  return `data:${mime};base64,${bytes.toString("base64")}`;
-}
+function normalizeExtractedShape(parsed: any): ScanResponseShape {
+  // Accept a few possible shapes from model responses
+  let bets: any[] = [];
+  let issues: string[] = [];
 
-function buildVisionPrompt(params: {
-  book?: string;
-  slipRef?: string;
-  filename?: string;
-}) {
-  const { book = "", slipRef = "", filename = "" } = params;
-
-  return `
-You are extracting sportsbook slip / capper graphic bet data into structured JSON for a betting ledger.
-
-IMPORTANT GOAL:
-- Extract EVERY visible betting line / leg.
-- Do NOT collapse a parlay graphic into only 1 row if multiple legs are shown.
-- If a parlay has 4 legs shown, return 4 bet rows (one per leg).
-- If a capper promo image shows a 3-pick parlay with player props, return 3 rows (one per leg).
-- When information is missing/unclear, leave blank and add an issue.
-
-Image context (may be blank):
-- book (user-entered): ${book || "(none)"}
-- slip_ref (user-entered): ${slipRef || "(none)"}
-- filename: ${filename || "(unknown)"}
-
-OUTPUT STRICT JSON ONLY (no markdown fences):
-{
-  "issues": ["string", "..."],
-  "extracted": {
-    "meta": {
-      "book": "string or empty",
-      "slip_ref": "string or empty",
-      "bet_type": "parlay|straight|unknown",
-      "parlay_legs_count_visible": number | null,
-      "overall_odds": number | string | null,
-      "wager": number | string | null,
-      "to_pay": number | string | null,
-      "payout": number | string | null,
-      "capper_detected": "string or empty"
-    },
-    "bets": [
-      {
-        "date": "YYYY-MM-DD or empty",
-        "capper": "string or empty",
-        "league": "NBA/NCAAM/NFL/EPL/ATP/etc or best guess raw text",
-        "market": "Spread|Moneyline|Total|Player Prop - Points|Player Prop - Assists|Player Prop - Rebounds|etc",
-        "play": "human-readable full leg text",
-        "selection": "team/player/over/under selection if separable",
-        "line": number or string or null,
-        "odds": number or string or null,
-        "units": null,
-        "opponent": "opponent or matchup if visible",
-        "notes": "extra details (parlay context, wager/payout, timestamps, uncertainty)"
-      }
-    ]
-  }
-}
-
-EXTRACTION RULES:
-1) Return one row per visible leg.
-2) Preserve leg odds if shown next to each leg.
-3) If only overall parlay odds are shown, include that in meta.overall_odds and mention in each row notes.
-4) If both overall and per-leg odds are shown, use per-leg odds for each row and overall in meta.
-5) For player props like "5+ De'Aaron Fox Assists":
-   - market = "Player Prop - Assists"
-   - selection = "De'Aaron Fox Assists"
-   - line = 5
-   - play = "De'Aaron Fox Assists 5+"
-6) For spreads like "#7 Purdue +4.5":
-   - market = "Spread"
-   - selection = "Purdue"
-   - line = 4.5
-   - play = "Purdue +4.5"
-7) For moneyline like "Xavier TO WIN":
-   - market = "Moneyline"
-   - selection = "Xavier"
-   - line = null
-   - play = "Xavier ML"
-8) Infer league when logos/teams clearly indicate it (e.g., PHO/SAS/ATL/PHI/DET/NY = NBA).
-9) Detect capper branding text (example: "HARRY LOCK PICKS") and set capper if visible.
-10) If anything is uncertain, still return the row and list an issue instead of skipping.
-
-Return JSON only.
-`.trim();
-}
-
-async function callOpenRouterVision(opts: {
-  apiKey: string;
-  models: string[];
-  dataUrl: string;
-  prompt: string;
-}) {
-  const { apiKey, models, dataUrl, prompt } = opts;
-
-  let lastErr: any = null;
-  const failures: string[] = [];
-
-  for (const model of models) {
-    const m = model.trim();
-    if (!m) continue;
-
-    try {
-      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          // Optional but helpful for OpenRouter analytics/debugging
-          "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000",
-          "X-Title": "Breakfast Klub Tracker",
-        },
-        body: JSON.stringify({
-          model: m,
-          temperature: 0.1,
-          max_tokens: 2200,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You extract sportsbook slips and capper graphics into strict JSON. Do not omit visible legs.",
-            },
-            {
-              role: "user",
-              content: [
-                { type: "text", text: prompt },
-                { type: "image_url", image_url: { url: dataUrl } },
-              ],
-            },
-          ],
-        }),
-      });
-
-      const out = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        const msg =
-          out?.error?.message ||
-          out?.message ||
-          `${res.status} ${res.statusText || "OpenRouter error"}`;
-        failures.push(`${m} failed: ${msg}`);
-        lastErr = new Error(msg);
-        continue;
-      }
-
-      const content = contentToString(out?.choices?.[0]?.message?.content);
-      if (!content) {
-        failures.push(`${m} failed: empty response content`);
-        lastErr = new Error("Empty model response");
-        continue;
-      }
-
-      return { model: m, content, raw: out, failures };
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      failures.push(`${m} failed: ${msg}`);
-      lastErr = e;
+  if (Array.isArray(parsed)) {
+    bets = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    if (Array.isArray(parsed.bets)) bets = parsed.bets;
+    if (Array.isArray(parsed.rows)) bets = parsed.rows;
+    if (Array.isArray(parsed.legs) && !bets.length) {
+      // If model returns legs instead of bets, convert legs -> bets
+      bets = parsed.legs.map((leg: any) => ({
+        date: parsed.date,
+        capper: parsed.capper,
+        league: parsed.league,
+        market: leg.market || parsed.market || "Parlay",
+        play: leg.play || leg.selection || "",
+        selection: leg.selection || "",
+        line: leg.line ?? "",
+        odds: leg.odds ?? "",
+        units: parsed.units ?? "",
+        opponent: leg.opponent || leg.matchup || "",
+        notes: parsed.notes || "Parsed from parlay legs",
+      }));
+    }
+    if (Array.isArray(parsed.issues)) {
+      issues = parsed.issues.map((x: any) => asStr(x)).filter(Boolean);
     }
   }
 
-  const details = failures.length ? failures.join(" | ") : lastErr?.message || "Unknown error";
-  throw new Error(`All vision providers failed. ${details}`);
+  const normalized = bets
+    .map(normalizeBet)
+    .filter((b) => b.play || b.market || b.league || b.opponent);
+
+  return { bets: normalized, issues };
+}
+
+async function callOpenRouterVision(args: {
+  apiKey: string;
+  model: string;
+  imageDataUrl: string;
+  book?: string;
+  slipRef?: string;
+}) {
+  const { apiKey, model, imageDataUrl, book, slipRef } = args;
+
+  const systemPrompt = [
+    "You extract sportsbook slips / betting graphics into structured JSON.",
+    "Return STRICT JSON only (no markdown fences).",
+    "You MUST extract ALL visible picks/legs (do not stop at 2 if 4 are visible).",
+    "If the image is a parlay, prefer ONE ROW PER LEG so the user can review/edit each leg before saving.",
+    "If overall parlay odds/wager/payout are visible, repeat them in each leg's notes (or odds if leg odds are missing).",
+    "If the image is a capper graphic (not a live sportsbook ticket), still extract rows from visible picks/legs.",
+    "Infer capper from header/branding text when visible (e.g., 'Harry Lock Picks').",
+    "Use best-guess league (NBA, NCAAM, NFL, MLB, NHL, ATP, WTA, EPL, UCL, etc.) from matchup/player/team context.",
+    "Do not invent hidden legs or stats not visible.",
+    "If uncertain, include warnings in issues[].",
+    "",
+    "JSON schema:",
+    "{",
+    '  "bets": [',
+    "    {",
+    '      "date": "YYYY-MM-DD or empty",',
+    '      "capper": "string",',
+    '      "league": "string",',
+    '      "market": "string",',
+    '      "play": "string",',
+    '      "selection": "string",',
+    '      "line": "string|number|null",',
+    '      "odds": "string|number|null",',
+    '      "units": "string|number|null",',
+    '      "opponent": "string",',
+    '      "notes": "string"',
+    "    }",
+    "  ],",
+    '  "issues": ["string"]',
+    "}",
+  ].join("\n");
+
+  const userText = [
+    "Extract all visible bets/legs from this image.",
+    `Book hint: ${book || ""}`,
+    `Slip ref hint: ${slipRef || ""}`,
+    "Important: if there are 3, 4, or more legs visible, include every one.",
+    "Do not return prose, only JSON.",
+  ].join("\n");
+
+  const body = {
+    model,
+    temperature: 0,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: systemPrompt },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: userText },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ],
+      },
+    ],
+  };
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      // Optional but recommended for OpenRouter
+      ...(process.env.NEXT_PUBLIC_APP_URL ? { "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL } : {}),
+      ...(process.env.NEXT_PUBLIC_APP_NAME ? { "X-Title": process.env.NEXT_PUBLIC_APP_NAME } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+
+  if (!res.ok) {
+    const errMsg =
+      json?.error?.message ||
+      json?.message ||
+      `HTTP ${res.status}`;
+    throw new Error(errMsg);
+  }
+
+  const content = json?.choices?.[0]?.message?.content;
+  if (typeof content === "string") return content;
+
+  // Some providers may return content blocks
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((c: any) => (typeof c?.text === "string" ? c.text : typeof c === "string" ? c : ""))
+      .filter(Boolean)
+      .join("\n");
+    if (joined) return joined;
+  }
+
+  throw new Error("No model response content");
+}
+
+async function tryVisionModels(args: {
+  apiKey: string;
+  imageDataUrl: string;
+  book?: string;
+  slipRef?: string;
+}) {
+  const configured = [
+    process.env.OPENROUTER_VISION_MODEL_PRIMARY || "nvidia/nemotron-nano-12b-v2-vl:free",
+    process.env.OPENROUTER_VISION_MODEL_SECONDARY || "qwen/qwen3-vl-30b-a3b-thinking",
+    process.env.OPENROUTER_VISION_MODEL_TERTIARY || "qwen/qwen3-vl-235b-a22b-thinking",
+    process.env.OPENROUTER_VISION_MODEL_QUATERNARY || "google/gemma-3-27b-it:free",
+  ].filter(Boolean);
+
+  const tried: string[] = [];
+  const errors: string[] = [];
+
+  for (const model of configured) {
+    tried.push(model);
+    try {
+      const raw = await callOpenRouterVision({
+        ...args,
+        model,
+      });
+      return { raw, model, tried, errors };
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      errors.push(`${model} failed: ${msg}`);
+      // continue to next provider/model
+    }
+  }
+
+  throw new Error(
+    `All vision providers failed. ${errors.join(" | ")}`
+  );
 }
 
 export async function POST(req: Request) {
@@ -305,7 +283,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing Supabase env vars" }, { status: 500 });
     }
 
-    // Validate user session via Supabase + bearer token (RLS-friendly auth check)
+    // Validate user session via Supabase (RLS-safe pattern)
     const supabase = createClient(url, anon, {
       auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       global: { headers: { Authorization: `Bearer ${token}` } },
@@ -318,8 +296,8 @@ export async function POST(req: Request) {
 
     const form = await req.formData();
     const file = form.get("file");
-    const book = String(form.get("book") ?? "").trim();
-    const slipRef = String(form.get("slip_ref") ?? "").trim();
+    const book = asStr(form.get("book")).trim();
+    const slipRef = asStr(form.get("slip_ref")).trim();
 
     if (!(file instanceof File)) {
       return NextResponse.json({ error: "Missing image file" }, { status: 400 });
@@ -329,152 +307,89 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Only image uploads are supported" }, { status: 400 });
     }
 
-    const bytes = Buffer.from(await file.arrayBuffer());
-    if (!bytes.length) {
-      return NextResponse.json({ error: "Uploaded image is empty" }, { status: 400 });
-    }
-
-    // ~12 MB guardrail (adjust if needed)
-    if (bytes.length > 12 * 1024 * 1024) {
-      return NextResponse.json({ error: "Image too large (max ~12MB)" }, { status: 413 });
-    }
-
-    const dataUrl = toDataUrl(file, bytes);
-
-    const openrouterKey = process.env.OPENROUTER_API_KEY;
-    if (!openrouterKey) {
+    // Keep payload sizes manageable for API calls
+    const maxBytes = 8 * 1024 * 1024; // 8 MB
+    if (file.size > maxBytes) {
       return NextResponse.json(
-        {
-          error:
-            "OPENROUTER_API_KEY is not set. Add it in Vercel Project Settings → Environment Variables.",
-        },
+        { error: "Image is too large (>8MB). Crop the slip and try again." },
+        { status: 400 }
+      );
+    }
+
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return NextResponse.json(
+        { error: "OPENROUTER_API_KEY is not configured on the server" },
         { status: 500 }
       );
     }
 
-    // Put your preferred FREE vision models first in Vercel env:
-    // OPENROUTER_VISION_MODELS=modelA,modelB,modelC
-    // Example placeholders shown below; replace with the exact models you selected.
-    const visionModels = (
-      process.env.OPENROUTER_VISION_MODELS ||
-      [
-        // Replace these with your exact OpenRouter free vision model IDs
-        "qwen/qwen2.5-vl-72b-instruct:free",
-        "meta-llama/llama-3.2-11b-vision-instruct:free",
-      ].join(",")
-    )
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const imageDataUrl = `data:${file.type};base64,${buffer.toString("base64")}`;
 
-    if (!visionModels.length) {
-      return NextResponse.json(
-        { error: "No vision models configured. Set OPENROUTER_VISION_MODELS in Vercel." },
-        { status: 500 }
-      );
-    }
-
-    const prompt = buildVisionPrompt({
+    const { raw, model, tried, errors } = await tryVisionModels({
+      apiKey,
+      imageDataUrl,
       book,
       slipRef,
-      filename: file.name,
     });
 
-    const result = await callOpenRouterVision({
-      apiKey: openrouterKey,
-      models: visionModels,
-      dataUrl,
-      prompt,
-    });
-
-    const parsed = tryParseJsonObject(result.content);
+    const parsed = safeJsonParse(raw);
     if (!parsed) {
       return NextResponse.json(
         {
-          error: "Vision model returned non-JSON output",
-          model: result.model,
-          raw_preview: result.content.slice(0, 2000),
-          failures: result.failures,
+          error: "Vision model response was not valid JSON",
+          provider: model,
+          tried,
+          raw_preview: raw.slice(0, 2000),
         },
         { status: 422 }
       );
     }
 
-    const normalized = normalizeExtractedOutput(parsed, "", "");
+    const normalized = normalizeExtractedShape(parsed);
 
-    // Extra safety checks / hints
-    const extraIssues = [...normalized.issues];
-
-    if (!normalized.extracted.bets.length) {
-      extraIssues.push("No bet rows were extracted from the image.");
-    }
-
-    // Warn when image clearly says parlay and we got too few rows
-    const fullText = JSON.stringify(parsed).toLowerCase() + " " + result.content.toLowerCase();
-    const mentionsParlay =
-      fullText.includes("parlay") || /(\d+)\s*pick\s*parlay/i.test(result.content);
-
-    if (mentionsParlay && normalized.extracted.bets.length <= 1) {
-      extraIssues.push(
-        "Parlay detected but only 1 row extracted. Review image and add missing legs manually if needed."
+    if (!normalized.bets.length) {
+      return NextResponse.json(
+        {
+          error: "No bets/legs detected from image",
+          provider: model,
+          tried,
+          issues: [
+            ...(normalized.issues || []),
+            "Try cropping closer to the slip content (remove large background graphics).",
+            "For capper graphics, ensure the actual pick box is readable.",
+          ],
+        },
+        { status: 422 }
       );
     }
 
-    // Force notes enrichment for parlay context if meta has wager/payout/overall odds
-    const meta = normalized.extracted.meta ?? {};
-    const parlayNoteParts: string[] = [];
-    if (meta?.bet_type) parlayNoteParts.push(`bet_type=${meta.bet_type}`);
-    if (meta?.overall_odds !== undefined && meta?.overall_odds !== null && meta?.overall_odds !== "")
-      parlayNoteParts.push(`overall_odds=${meta.overall_odds}`);
-    if (meta?.wager !== undefined && meta?.wager !== null && meta?.wager !== "")
-      parlayNoteParts.push(`wager=${meta.wager}`);
-    if (meta?.to_pay !== undefined && meta?.to_pay !== null && meta?.to_pay !== "")
-      parlayNoteParts.push(`to_pay=${meta.to_pay}`);
-    if (meta?.payout !== undefined && meta?.payout !== null && meta?.payout !== "")
-      parlayNoteParts.push(`payout=${meta.payout}`);
+    // Post-process hints for common capper graphics / parlays
+    const enrichedBets = normalized.bets.map((b) => {
+      const notes: string[] = [];
+      if (b.notes) notes.push(String(b.notes));
+      if (book) notes.push(`Book=${book}`);
+      if (slipRef) notes.push(`SlipRef=${slipRef}`);
 
-    const capperDetected = String(meta?.capper_detected ?? "").trim();
-
-    const bets = normalized.extracted.bets.map((b) => {
-      const currentNotes = String(b.notes ?? "").trim();
-      const injected: string[] = [];
-
-      if (capperDetected && !String(b.capper ?? "").trim()) {
-        b.capper = capperDetected;
-      }
-
-      if (parlayNoteParts.length) injected.push(parlayNoteParts.join(", "));
-      if (book) injected.push(`book=${book}`);
-      if (slipRef) injected.push(`slip_ref=${slipRef}`);
-
-      const mergedNotes = [currentNotes, ...injected].filter(Boolean).join(" | ");
       return {
         ...b,
-        notes: mergedNotes || "",
-        line: normalizeLine(b.line),
-        odds: normalizeOdds(b.odds),
-        units: b.units ?? "",
+        date: b.date || todayISO(),
+        capper: b.capper || "Personal",
+        notes: notes.join(" | ") || "",
       };
     });
 
-    // Detect obvious missed leg count mismatch if model reported visible leg count
-    const reportedLegs = Number(meta?.parlay_legs_count_visible);
-    if (Number.isFinite(reportedLegs) && reportedLegs > 0 && bets.length < reportedLegs) {
-      extraIssues.push(
-        `Visible parlay legs may be ${reportedLegs}, but only ${bets.length} rows were extracted. Review/edit before adding to ledger.`
-      );
-    }
-
     return NextResponse.json({
-      issues: extraIssues,
-      extracted: {
-        bets,
-        meta: { ...(normalized.extracted.meta ?? {}), model_used: result.model },
-      },
+      provider_used: model,
+      providers_tried: tried,
+      warnings_from_fallbacks: errors,
+      issues: normalized.issues || [],
+      extracted: { bets: enrichedBets },
     });
   } catch (e: any) {
     return NextResponse.json(
-      { error: e?.message ?? "Scan failed" },
+      { error: e?.message || "Scan failed" },
       { status: 500 }
     );
   }
