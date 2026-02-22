@@ -1,208 +1,224 @@
+// src/lib/ai/router.ts
 import { chatCompletion, type ChatMessage, type OpenAICompatConfig } from "./openaiCompat";
 
 export type Strategy = "fast" | "balanced" | "consensus";
 
-function getTextProviderConfigs(): {
+type ProviderName = "groq" | "cerebras" | "mistral" | "hf";
+
+type ProviderConfigMap = {
   groq?: OpenAICompatConfig;
+  cerebras?: OpenAICompatConfig;
   mistral?: OpenAICompatConfig;
   hf?: OpenAICompatConfig;
-  cerebras?: OpenAICompatConfig;
-} {
-  const groqKey = process.env.GROQ_API_KEY;
-  const mistralKey = process.env.MISTRAL_API_KEY;
-  const hfKey = process.env.HF_TOKEN;
-  const cerebrasKey = process.env.CEREBRAS_API_KEY;
+};
 
-  return {
+function env(name: string): string | undefined {
+  const v = process.env[name];
+  return v && v.trim() ? v.trim() : undefined;
+}
+
+function isVisionModelName(model?: string) {
+  if (!model) return false;
+  return /vision|pixtral|vl/i.test(model);
+}
+
+/**
+ * TEXT router configs (used by /api/ai chat route)
+ *
+ * Notes:
+ * - HF is skipped unless HF_MODEL is explicitly set (you said you don't have HF text models).
+ * - Mistral is included, but if your MISTRAL_MODEL looks like a vision model, it is skipped for text.
+ * - Cerebras is added as another OpenAI-compatible provider.
+ */
+function getProviderConfigs(): ProviderConfigMap {
+  const groqKey = env("GROQ_API_KEY");
+  const cerebrasKey = env("CEREBRAS_API_KEY");
+  const mistralKey = env("MISTRAL_API_KEY");
+  const hfKey = env("HF_TOKEN"); // you renamed to this
+
+  const groqModel = env("GROQ_MODEL") || "llama-3.3-70b-versatile";
+
+  // If this default model errors on your Cerebras account, set CEREBRAS_MODEL in Vercel env vars.
+  const cerebrasModel = env("CEREBRAS_MODEL") || "llama3.1-8b";
+
+  const mistralModel = env("MISTRAL_MODEL") || "mistral-small-latest";
+
+  // IMPORTANT: no default HF text model (so it won't fail if you only have HF creds but no usable model)
+  const hfModel = env("HF_MODEL");
+
+  const cfgs: ProviderConfigMap = {
     groq: groqKey
       ? {
           baseUrl: "https://api.groq.com/openai/v1",
           apiKey: groqKey,
-          model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
-        }
-      : undefined,
-
-    mistral: mistralKey
-      ? {
-          baseUrl: "https://api.mistral.ai/v1",
-          apiKey: mistralKey,
-          model: process.env.MISTRAL_MODEL || "mistral-small-latest",
-        }
-      : undefined,
-
-    hf: hfKey
-      ? {
-          baseUrl: "https://router.huggingface.co/v1",
-          apiKey: hfKey,
-          model: process.env.HF_MODEL || "mistralai/Mistral-7B-Instruct-v0.3",
+          model: groqModel,
         }
       : undefined,
 
     cerebras: cerebrasKey
       ? {
+          // Cerebras OpenAI-compatible endpoint
           baseUrl: "https://api.cerebras.ai/v1",
           apiKey: cerebrasKey,
-          model: process.env.CEREBRAS_MODEL || "llama-3.3-70b",
-        }
-      : undefined,
-  };
-}
-
-/**
- * Vision-capable provider configs for slip scanning.
- * IMPORTANT: set *_VISION_MODEL env vars to models that actually support image input.
- */
-function getVisionProviderConfigs(): {
-  groq?: OpenAICompatConfig;
-  mistral?: OpenAICompatConfig;
-  hf?: OpenAICompatConfig;
-  cerebras?: OpenAICompatConfig;
-} {
-  const groqKey = process.env.GROQ_API_KEY;
-  const mistralKey = process.env.MISTRAL_API_KEY;
-  const hfKey = process.env.HF_TOKEN;
-  const cerebrasKey = process.env.CEREBRAS_API_KEY;
-
-  return {
-    groq: groqKey
-      ? {
-          baseUrl: "https://api.groq.com/openai/v1",
-          apiKey: groqKey,
-          model: process.env.GROQ_VISION_MODEL || process.env.GROQ_MODEL || "",
+          model: cerebrasModel,
         }
       : undefined,
 
-    mistral: mistralKey
-      ? {
-          baseUrl: "https://api.mistral.ai/v1",
-          apiKey: mistralKey,
-          model: process.env.MISTRAL_VISION_MODEL || process.env.MISTRAL_MODEL || "",
-        }
-      : undefined,
-
-    hf: hfKey
-      ? {
-          baseUrl: "https://router.huggingface.co/v1",
-          apiKey: hfKey,
-          model: process.env.HF_VISION_MODEL || process.env.HF_MODEL || "",
-        }
-      : undefined,
-
-    // Cerebras may or may not have a vision model enabled for your account.
-    // If not, leave CEREBRAS_VISION_MODEL unset and this provider will be skipped for scanning.
-    cerebras:
-      cerebrasKey && process.env.CEREBRAS_VISION_MODEL
+    mistral:
+      mistralKey && !isVisionModelName(mistralModel)
         ? {
-            baseUrl: "https://api.cerebras.ai/v1",
-            apiKey: cerebrasKey,
-            model: process.env.CEREBRAS_VISION_MODEL,
+            baseUrl: "https://api.mistral.ai/v1",
+            apiKey: mistralKey,
+            model: mistralModel,
+          }
+        : undefined,
+
+    // Skip HF text unless HF_MODEL is explicitly set
+    hf:
+      hfKey && hfModel
+        ? {
+            baseUrl: "https://router.huggingface.co/v1",
+            apiKey: hfKey,
+            model: hfModel,
           }
         : undefined,
   };
+
+  return cfgs;
 }
 
 async function tryInOrder(
-  order: Array<OpenAICompatConfig | undefined>,
+  order: Array<{ name: ProviderName; cfg?: OpenAICompatConfig }>,
   messages: ChatMessage[],
   opts?: { temperature?: number; max_tokens?: number }
 ) {
   let lastErr: any = null;
+  const tried: string[] = [];
 
-  for (const cfg of order) {
-    if (!cfg || !cfg.model) continue;
+  for (const item of order) {
+    if (!item.cfg) continue;
+
     try {
-      return await chatCompletion(cfg, messages, opts);
-    } catch (e) {
+      return await chatCompletion(item.cfg, messages, opts);
+    } catch (e: any) {
       lastErr = e;
+      tried.push(`${item.name}: ${e?.message ?? String(e)}`);
+      // continue to next provider
     }
   }
 
-  throw lastErr ?? new Error("No providers configured");
+  if (!tried.length) {
+    throw new Error(
+      "No text AI providers configured. Add one or more of: GROQ_API_KEY, CEREBRAS_API_KEY, MISTRAL_API_KEY (+ non-vision MISTRAL_MODEL), HF_TOKEN + HF_MODEL"
+    );
+  }
+
+  throw new Error(`All providers failed. ${tried.join(" | ")}`);
 }
 
 export async function runPrimary(strategy: Strategy, messages: ChatMessage[]) {
-  const { groq, mistral, hf, cerebras } = getTextProviderConfigs();
+  const { groq, cerebras, mistral, hf } = getProviderConfigs();
 
+  // Fast: prefer cheapest/fastest likely path first (Groq/Cerebras), then Mistral, then HF
   if (strategy === "fast") {
-    return await tryInOrder([groq, cerebras, mistral, hf], messages, {
-      temperature: 0.2,
-      max_tokens: 900,
-    });
+    return await tryInOrder(
+      [
+        { name: "groq", cfg: groq },
+        { name: "cerebras", cfg: cerebras },
+        { name: "mistral", cfg: mistral },
+        { name: "hf", cfg: hf },
+      ],
+      messages,
+      { temperature: 0.2, max_tokens: 900 }
+    );
   }
 
-  return await tryInOrder([groq, mistral, cerebras, hf], messages, {
-    temperature: 0.2,
-    max_tokens: 1000,
-  });
+  // Balanced/default
+  return await tryInOrder(
+    [
+      { name: "groq", cfg: groq },
+      { name: "cerebras", cfg: cerebras },
+      { name: "mistral", cfg: mistral },
+      { name: "hf", cfg: hf },
+    ],
+    messages,
+    { temperature: 0.2, max_tokens: 1000 }
+  );
 }
 
 export async function runVerifier(messages: ChatMessage[]) {
-  const { mistral, groq, cerebras, hf } = getTextProviderConfigs();
-  return await tryInOrder([mistral, groq, cerebras, hf], messages, {
-    temperature: 0,
-    max_tokens: 700,
-  });
+  const { mistral, groq, cerebras, hf } = getProviderConfigs();
+
+  // Verifier order favors deterministic/stable response; skip unavailable automatically
+  return await tryInOrder(
+    [
+      { name: "mistral", cfg: mistral },
+      { name: "groq", cfg: groq },
+      { name: "cerebras", cfg: cerebras },
+      { name: "hf", cfg: hf },
+    ],
+    messages,
+    { temperature: 0, max_tokens: 700 }
+  );
 }
 
 export async function runConsensus(messages: ChatMessage[]) {
-  const { groq, mistral, cerebras, hf } = getTextProviderConfigs();
+  const { groq, cerebras, mistral, hf } = getProviderConfigs();
 
-  const candidates = [groq, mistral, cerebras].filter(Boolean) as OpenAICompatConfig[];
+  // Try to get two independent responses from the best available providers.
+  // We prefer Groq + Cerebras first, then Mistral, then HF (if explicitly configured).
+  const candidates: Array<{ name: ProviderName; cfg?: OpenAICompatConfig }> = [
+    { name: "groq", cfg: groq },
+    { name: "cerebras", cfg: cerebras },
+    { name: "mistral", cfg: mistral },
+    { name: "hf", cfg: hf },
+  ].filter((x) => !!x.cfg) as Array<{ name: ProviderName; cfg: OpenAICompatConfig }>;
 
-  const [a, b] = await Promise.allSettled([
-    candidates[0]
-      ? chatCompletion(candidates[0], messages, { temperature: 0.2, max_tokens: 900 })
-      : Promise.reject("no provider A"),
-    candidates[1]
-      ? chatCompletion(candidates[1], messages, { temperature: 0.2, max_tokens: 900 })
-      : Promise.reject("no provider B"),
-  ]);
+  if (!candidates.length) {
+    throw new Error(
+      "No providers configured for consensus. Add GROQ_API_KEY and/or CEREBRAS_API_KEY (recommended)."
+    );
+  }
 
-  const results = [a, b].filter((x): x is PromiseFulfilledResult<string> => x.status === "fulfilled");
-  if (results.length >= 2) return { a: results[0].value, b: results[1].value };
+  const firstTwo = candidates.slice(0, 2);
 
-  const one = results[0]?.value;
-  if (one) return { a: one, b: null };
-
-  if (!hf) throw new Error("No providers configured for consensus");
-  return { a: await chatCompletion(hf, messages), b: null };
-}
-
-/* --------------------------
-   Scanner-specific helpers
-   -------------------------- */
-
-export async function runSlipScanPrimary(messages: ChatMessage[]) {
-  const { groq, mistral, hf, cerebras } = getVisionProviderConfigs();
-
-  // Try likely vision providers first, Cerebras only if you explicitly set CEREBRAS_VISION_MODEL
-  return await tryInOrder([groq, mistral, hf, cerebras], messages, {
-    temperature: 0,
-    max_tokens: 1400,
-  });
-}
-
-export async function runSlipScanConsensus(messages: ChatMessage[]) {
-  const { groq, mistral, hf, cerebras } = getVisionProviderConfigs();
-
-  const candidates = [groq, mistral, hf, cerebras].filter(
-    (x): x is OpenAICompatConfig => !!x && !!x.model
+  const settled = await Promise.allSettled(
+    firstTwo.map((p) =>
+      chatCompletion(p.cfg, messages, { temperature: 0.2, max_tokens: 900 })
+    )
   );
 
-  const [a, b] = await Promise.allSettled([
-    candidates[0]
-      ? chatCompletion(candidates[0], messages, { temperature: 0, max_tokens: 1400 })
-      : Promise.reject("no provider A"),
-    candidates[1]
-      ? chatCompletion(candidates[1], messages, { temperature: 0, max_tokens: 1400 })
-      : Promise.reject("no provider B"),
-  ]);
+  const ok = settled.filter(
+    (x): x is PromiseFulfilledResult<string> => x.status === "fulfilled"
+  );
 
-  const results = [a, b].filter((x): x is PromiseFulfilledResult<string> => x.status === "fulfilled");
-  if (results.length >= 2) return { a: results[0].value, b: results[1].value };
+  if (ok.length >= 2) {
+    return { a: ok[0].value, b: ok[1].value };
+  }
 
-  const one = results[0]?.value;
-  if (one) return { a: one, b: null };
+  if (ok.length === 1) {
+    // Get a second answer from any remaining provider
+    const remaining = candidates.slice(2);
+    for (const p of remaining) {
+      try {
+        const second = await chatCompletion(p.cfg, messages, {
+          temperature: 0.2,
+          max_tokens: 900,
+        });
+        return { a: ok[0].value, b: second };
+      } catch {
+        // keep trying
+      }
+    }
+    return { a: ok[0].value, b: null };
+  }
 
-  throw new Error("No vision-capable providers configured for slip scanning");
+  // If both initial attempts failed, try all providers one by one until one works
+  const fallback = await tryInOrder(
+    candidates.map((c) => ({ name: c.name, cfg: c.cfg })),
+    messages,
+    { temperature: 0.2, max_tokens: 900 }
+  );
+
+  return { a: fallback, b: null };
 }
