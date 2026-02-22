@@ -1,224 +1,152 @@
-// src/lib/ai/router.ts
 import { chatCompletion, type ChatMessage, type OpenAICompatConfig } from "./openaiCompat";
 
 export type Strategy = "fast" | "balanced" | "consensus";
 
-type ProviderName = "groq" | "cerebras" | "mistral" | "hf";
-
-type ProviderConfigMap = {
+type ProviderMap = {
+  openrouter?: OpenAICompatConfig;
   groq?: OpenAICompatConfig;
   cerebras?: OpenAICompatConfig;
   mistral?: OpenAICompatConfig;
   hf?: OpenAICompatConfig;
 };
 
-function env(name: string): string | undefined {
-  const v = process.env[name];
-  return v && v.trim() ? v.trim() : undefined;
-}
+function getProviderConfigs(): ProviderMap {
+  const openrouterKey = process.env.OPENROUTER_API_KEY;
+  const groqKey = process.env.GROQ_API_KEY;
+  const cerebrasKey = process.env.CEREBRAS_API_KEY;
+  const mistralKey = process.env.MISTRAL_API_KEY;
+  const hfKey = process.env.HF_TOKEN;
 
-function isVisionModelName(model?: string) {
-  if (!model) return false;
-  return /vision|pixtral|vl/i.test(model);
-}
+  return {
+    // OpenRouter (recommended primary now)
+    openrouter: openrouterKey
+      ? {
+          baseUrl: "https://openrouter.ai/api/v1",
+          apiKey: openrouterKey,
+          // Set this in Vercel to one of your preferred FREE text models on OpenRouter
+          // e.g. "meta-llama/llama-3.1-8b-instruct:free"
+          model: process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free",
+        }
+      : undefined,
 
-/**
- * TEXT router configs (used by /api/ai chat route)
- *
- * Notes:
- * - HF is skipped unless HF_MODEL is explicitly set (you said you don't have HF text models).
- * - Mistral is included, but if your MISTRAL_MODEL looks like a vision model, it is skipped for text.
- * - Cerebras is added as another OpenAI-compatible provider.
- */
-function getProviderConfigs(): ProviderConfigMap {
-  const groqKey = env("GROQ_API_KEY");
-  const cerebrasKey = env("CEREBRAS_API_KEY");
-  const mistralKey = env("MISTRAL_API_KEY");
-  const hfKey = env("HF_TOKEN"); // you renamed to this
-
-  const groqModel = env("GROQ_MODEL") || "llama-3.3-70b-versatile";
-
-  // If this default model errors on your Cerebras account, set CEREBRAS_MODEL in Vercel env vars.
-  const cerebrasModel = env("CEREBRAS_MODEL") || "llama3.1-8b";
-
-  const mistralModel = env("MISTRAL_MODEL") || "mistral-small-latest";
-
-  // IMPORTANT: no default HF text model (so it won't fail if you only have HF creds but no usable model)
-  const hfModel = env("HF_MODEL");
-
-  const cfgs: ProviderConfigMap = {
+    // Groq
     groq: groqKey
       ? {
           baseUrl: "https://api.groq.com/openai/v1",
           apiKey: groqKey,
-          model: groqModel,
+          model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
         }
       : undefined,
 
+    // Cerebras (OpenAI-compatible)
     cerebras: cerebrasKey
       ? {
-          // Cerebras OpenAI-compatible endpoint
           baseUrl: "https://api.cerebras.ai/v1",
           apiKey: cerebrasKey,
-          model: cerebrasModel,
+          // Set exact model in env if needed for your account
+          model: process.env.CEREBRAS_MODEL || "llama-3.3-70b",
         }
       : undefined,
 
-    mistral:
-      mistralKey && !isVisionModelName(mistralModel)
-        ? {
-            baseUrl: "https://api.mistral.ai/v1",
-            apiKey: mistralKey,
-            model: mistralModel,
-          }
-        : undefined,
+    // Mistral (text)
+    mistral: mistralKey
+      ? {
+          baseUrl: "https://api.mistral.ai/v1",
+          apiKey: mistralKey,
+          model: process.env.MISTRAL_MODEL || "mistral-small-latest",
+        }
+      : undefined,
 
-    // Skip HF text unless HF_MODEL is explicitly set
-    hf:
-      hfKey && hfModel
-        ? {
-            baseUrl: "https://router.huggingface.co/v1",
-            apiKey: hfKey,
-            model: hfModel,
-          }
-        : undefined,
+    // Hugging Face Router (text)
+    hf: hfKey
+      ? {
+          baseUrl: "https://router.huggingface.co/v1",
+          apiKey: hfKey,
+          model: process.env.HF_MODEL || "mistralai/Mistral-7B-Instruct-v0.3",
+        }
+      : undefined,
   };
-
-  return cfgs;
 }
 
 async function tryInOrder(
-  order: Array<{ name: ProviderName; cfg?: OpenAICompatConfig }>,
+  order: Array<OpenAICompatConfig | undefined>,
   messages: ChatMessage[],
   opts?: { temperature?: number; max_tokens?: number }
 ) {
   let lastErr: any = null;
-  const tried: string[] = [];
 
-  for (const item of order) {
-    if (!item.cfg) continue;
-
+  for (const cfg of order) {
+    if (!cfg) continue;
     try {
-      return await chatCompletion(item.cfg, messages, opts);
-    } catch (e: any) {
+      return await chatCompletion(cfg, messages, opts);
+    } catch (e) {
       lastErr = e;
-      tried.push(`${item.name}: ${e?.message ?? String(e)}`);
-      // continue to next provider
     }
   }
 
-  if (!tried.length) {
-    throw new Error(
-      "No text AI providers configured. Add one or more of: GROQ_API_KEY, CEREBRAS_API_KEY, MISTRAL_API_KEY (+ non-vision MISTRAL_MODEL), HF_TOKEN + HF_MODEL"
-    );
-  }
-
-  throw new Error(`All providers failed. ${tried.join(" | ")}`);
+  throw lastErr ?? new Error("No providers configured");
 }
 
 export async function runPrimary(strategy: Strategy, messages: ChatMessage[]) {
-  const { groq, cerebras, mistral, hf } = getProviderConfigs();
+  const { openrouter, groq, cerebras, mistral, hf } = getProviderConfigs();
 
-  // Fast: prefer cheapest/fastest likely path first (Groq/Cerebras), then Mistral, then HF
   if (strategy === "fast") {
-    return await tryInOrder(
-      [
-        { name: "groq", cfg: groq },
-        { name: "cerebras", cfg: cerebras },
-        { name: "mistral", cfg: mistral },
-        { name: "hf", cfg: hf },
-      ],
-      messages,
-      { temperature: 0.2, max_tokens: 900 }
-    );
+    // Lowest latency first (usually Groq/Cerebras/OpenRouter free small model)
+    return await tryInOrder([groq, cerebras, openrouter, mistral, hf], messages, {
+      temperature: 0.2,
+      max_tokens: 900,
+    });
   }
 
-  // Balanced/default
-  return await tryInOrder(
-    [
-      { name: "groq", cfg: groq },
-      { name: "cerebras", cfg: cerebras },
-      { name: "mistral", cfg: mistral },
-      { name: "hf", cfg: hf },
-    ],
-    messages,
-    { temperature: 0.2, max_tokens: 1000 }
-  );
+  // balanced default
+  return await tryInOrder([openrouter, groq, cerebras, mistral, hf], messages, {
+    temperature: 0.2,
+    max_tokens: 1000,
+  });
 }
 
 export async function runVerifier(messages: ChatMessage[]) {
-  const { mistral, groq, cerebras, hf } = getProviderConfigs();
+  const { openrouter, mistral, groq, cerebras, hf } = getProviderConfigs();
 
-  // Verifier order favors deterministic/stable response; skip unavailable automatically
-  return await tryInOrder(
-    [
-      { name: "mistral", cfg: mistral },
-      { name: "groq", cfg: groq },
-      { name: "cerebras", cfg: cerebras },
-      { name: "hf", cfg: hf },
-    ],
-    messages,
-    { temperature: 0, max_tokens: 700 }
-  );
+  // Prefer deterministic / reliable verifier order
+  return await tryInOrder([openrouter, mistral, groq, cerebras, hf], messages, {
+    temperature: 0,
+    max_tokens: 700,
+  });
 }
 
 export async function runConsensus(messages: ChatMessage[]) {
-  const { groq, cerebras, mistral, hf } = getProviderConfigs();
+  const { openrouter, groq, cerebras, mistral, hf } = getProviderConfigs();
 
-  // Try to get two independent responses from the best available providers.
-  // We prefer Groq + Cerebras first, then Mistral, then HF (if explicitly configured).
-  const candidates: Array<{ name: ProviderName; cfg?: OpenAICompatConfig }> = [
-    { name: "groq", cfg: groq },
-    { name: "cerebras", cfg: cerebras },
-    { name: "mistral", cfg: mistral },
-    { name: "hf", cfg: hf },
-  ].filter((x) => !!x.cfg) as Array<{ name: ProviderName; cfg: OpenAICompatConfig }>;
+  // Try to get 2 independent drafts (ideally different providers)
+  const pairs: Array<OpenAICompatConfig | undefined> = [openrouter, groq, cerebras, mistral, hf].filter(
+    Boolean
+  );
 
-  if (!candidates.length) {
-    throw new Error(
-      "No providers configured for consensus. Add GROQ_API_KEY and/or CEREBRAS_API_KEY (recommended)."
+  if (pairs.length === 0) throw new Error("No providers configured for consensus");
+
+  // First two providers
+  if (pairs.length >= 2) {
+    const [cfgA, cfgB] = pairs;
+
+    const [a, b] = await Promise.allSettled([
+      chatCompletion(cfgA!, messages, { temperature: 0.2, max_tokens: 900 }),
+      chatCompletion(cfgB!, messages, { temperature: 0.2, max_tokens: 900 }),
+    ]);
+
+    const results = [a, b].filter(
+      (x): x is PromiseFulfilledResult<string> => x.status === "fulfilled"
     );
+
+    if (results.length >= 2) return { a: results[0].value, b: results[1].value };
+    if (results.length === 1) return { a: results[0].value, b: null };
   }
 
-  const firstTwo = candidates.slice(0, 2);
+  // Fallback single response from any configured provider
+  const one = await tryInOrder([openrouter, groq, cerebras, mistral, hf], messages, {
+    temperature: 0.2,
+    max_tokens: 900,
+  });
 
-  const settled = await Promise.allSettled(
-    firstTwo.map((p) =>
-      chatCompletion(p.cfg, messages, { temperature: 0.2, max_tokens: 900 })
-    )
-  );
-
-  const ok = settled.filter(
-    (x): x is PromiseFulfilledResult<string> => x.status === "fulfilled"
-  );
-
-  if (ok.length >= 2) {
-    return { a: ok[0].value, b: ok[1].value };
-  }
-
-  if (ok.length === 1) {
-    // Get a second answer from any remaining provider
-    const remaining = candidates.slice(2);
-    for (const p of remaining) {
-      try {
-        const second = await chatCompletion(p.cfg, messages, {
-          temperature: 0.2,
-          max_tokens: 900,
-        });
-        return { a: ok[0].value, b: second };
-      } catch {
-        // keep trying
-      }
-    }
-    return { a: ok[0].value, b: null };
-  }
-
-  // If both initial attempts failed, try all providers one by one until one works
-  const fallback = await tryInOrder(
-    candidates.map((c) => ({ name: c.name, cfg: c.cfg })),
-    messages,
-    { temperature: 0.2, max_tokens: 900 }
-  );
-
-  return { a: fallback, b: null };
+  return { a: one, b: null };
 }
